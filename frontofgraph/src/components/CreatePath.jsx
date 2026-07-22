@@ -329,7 +329,7 @@ const CreatePath = () => {
                     if (currentStep < path.length - 1) {
                         const fromId = path[currentStep];
                         const toId = path[currentStep + 1];
-                        const currentEdge = edges.find(e => 
+                        const currentEdge = edges.find(e =>
                             (e.from === fromId && e.to === toId) ||
                             (e.from === toId && e.to === fromId)
                         );
@@ -650,26 +650,26 @@ const CreatePath = () => {
                             </pattern>
 
                             {/* Arrow Marker */}
-                            <marker 
-                                id="arrow" 
-                                viewBox="0 0 10 10" 
-                                refX="22" 
-                                refY="5" 
-                                markerWidth="6" 
-                                markerHeight="6" 
+                            <marker
+                                id="arrow"
+                                viewBox="0 0 10 10"
+                                refX="22"
+                                refY="5"
+                                markerWidth="6"
+                                markerHeight="6"
                                 orient="auto-start-reverse"
                             >
                                 <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="rgba(255,255,255,0.25)" />
                             </marker>
 
                             {/* Selected Arrow Marker */}
-                            <marker 
-                                id="arrow-selected" 
-                                viewBox="0 0 10 10" 
-                                refX="22" 
-                                refY="5" 
-                                markerWidth="6" 
-                                markerHeight="6" 
+                            <marker
+                                id="arrow-selected"
+                                viewBox="0 0 10 10"
+                                refX="22"
+                                refY="5"
+                                markerWidth="6"
+                                markerHeight="6"
                                 orient="auto-start-reverse"
                             >
                                 <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#3B82F6" />
@@ -682,185 +682,185 @@ const CreatePath = () => {
                         {/* Transform Group for Pan & Zoom */}
                         <g transform={`translate(${panOffset.x}, ${panOffset.y}) scale(${zoom})`}>
 
-                        {/* Path Lines (Edges) */}
-                        {edges.map(edge => {
-                            const fromNode = nodes.find(n => n.id === edge.from);
-                            const toNode = nodes.find(n => n.id === edge.to);
-                            if (!fromNode || !toNode) return null;
+                            {/* Path Lines (Edges) */}
+                            {edges.map(edge => {
+                                const fromNode = nodes.find(n => n.id === edge.from);
+                                const toNode = nodes.find(n => n.id === edge.to);
+                                if (!fromNode || !toNode) return null;
 
-                            const isSelected = selectedEdgeId === edge.id;
+                                const isSelected = selectedEdgeId === edge.id;
 
-                            return (
-                                <g key={edge.id}>
-                                    {/* Selection Glow */}
-                                    {isSelected && (
+                                return (
+                                    <g key={edge.id}>
+                                        {/* Selection Glow */}
+                                        {isSelected && (
+                                            <line
+                                                x1={fromNode.x}
+                                                y1={fromNode.y}
+                                                x2={toNode.x}
+                                                y2={toNode.y}
+                                                stroke="rgba(59, 130, 246, 0.25)"
+                                                strokeWidth="8"
+                                                strokeLinecap="round"
+                                            />
+                                        )}
+
+                                        {/* Underlay thick line */}
                                         <line
                                             x1={fromNode.x}
                                             y1={fromNode.y}
                                             x2={toNode.x}
                                             y2={toNode.y}
-                                            stroke="rgba(59, 130, 246, 0.25)"
-                                            strokeWidth="8"
+                                            stroke={isSelected ? "#3B82F6" : "rgba(255, 255, 255, 0.08)"}
+                                            strokeWidth="3.5"
                                             strokeLinecap="round"
                                         />
-                                    )}
 
-                                    {/* Underlay thick line */}
-                                    <line
-                                        x1={fromNode.x}
-                                        y1={fromNode.y}
-                                        x2={toNode.x}
-                                        y2={toNode.y}
-                                        stroke={isSelected ? "#3B82F6" : "rgba(255, 255, 255, 0.08)"}
-                                        strokeWidth="3.5"
-                                        strokeLinecap="round"
-                                    />
-
-                                    {/* Inner line with Arrow */}
-                                    <line
-                                        x1={fromNode.x}
-                                        y1={fromNode.y}
-                                        x2={toNode.x}
-                                        y2={toNode.y}
-                                        stroke={isSelected ? "#3B82F6" : "rgba(255, 255, 255, 0.15)"}
-                                        strokeWidth="1.5"
-                                        markerEnd={isSelected ? "url(#arrow-selected)" : "url(#arrow)"}
-                                        strokeLinecap="round"
-                                    />
-
-                                    {/* Interactive hover/click area */}
-                                    <line
-                                        x1={fromNode.x}
-                                        y1={fromNode.y}
-                                        x2={toNode.x}
-                                        y2={toNode.y}
-                                        stroke="transparent"
-                                        strokeWidth="16"
-                                        strokeLinecap="round"
-                                        style={{ cursor: "pointer" }}
-                                        onClick={(e) => handleEdgeClick(e, edge)}
-                                    />
-
-                                    {/* Speed & Distance Badge */}
-                                    {(() => {
-                                        const midX = (fromNode.x + toNode.x) / 2;
-                                        const midY = (fromNode.y + toNode.y) / 2;
-                                        const mult = edge.speedMultiplier || 1.0;
-                                        const dist = edge.distance || 10.0;
-                                        
-                                        return (
-                                            <g 
-                                                transform={`translate(${midX}, ${midY})`}
-                                                style={{ pointerEvents: "none", userSelect: "none" }}
-                                            >
-                                                <rect
-                                                    x="-28"
-                                                    y="-8"
-                                                    width="56"
-                                                    height="16"
-                                                    rx="4"
-                                                    fill="rgba(7, 7, 7, 0.85)"
-                                                    stroke={isSelected ? "#3B82F6" : "rgba(255, 255, 255, 0.12)"}
-                                                    strokeWidth={isSelected ? "1.5" : "1"}
-                                                />
-                                                <text
-                                                    textAnchor="middle"
-                                                    dy=".3em"
-                                                    fontSize="9px"
-                                                    fontWeight="700"
-                                                    fill="#FFFFFF"
-                                                >
-                                                    <tspan fill={isSelected ? "#3B82F6" : "#10B981"}>{mult.toFixed(1)}x</tspan>
-                                                    <tspan fill="rgba(255, 255, 255, 0.2)"> | </tspan>
-                                                    <tspan fill={isSelected ? "#3B82F6" : "#3B82F6"}>{dist.toFixed(0)}m</tspan>
-                                                </text>
-                                            </g>
-                                        );
-                                    })()}
-                                </g>
-                            );
-                        })}
-
-                        {/* Node Elements */}
-                        {nodes.map(node => {
-                            const rgbColor = getNodeColor(node.type);
-                            const isSelected = selectedNodeId === node.id;
-                            const isConnectingStart = connectingStartId === node.id;
-
-                            return (
-                                <g
-                                    key={node.id}
-                                    transform={`translate(${node.x}, ${node.y})`}
-                                    onMouseDown={(e) => handleNodeMouseDown(e, node)}
-                                    style={{ cursor: isSimulating ? "default" : "grab" }}
-                                >
-                                    {/* Selection Glow */}
-                                    {(isSelected || isConnectingStart) && (
-                                        <circle
-                                            r="26"
-                                            fill="none"
-                                            stroke={isConnectingStart ? "#3B82F6" : `rgb(${rgbColor})`}
-                                            strokeWidth="2"
-                                            strokeDasharray="4 4"
-                                            className="glow-ring"
+                                        {/* Inner line with Arrow */}
+                                        <line
+                                            x1={fromNode.x}
+                                            y1={fromNode.y}
+                                            x2={toNode.x}
+                                            y2={toNode.y}
+                                            stroke={isSelected ? "#3B82F6" : "rgba(255, 255, 255, 0.15)"}
+                                            strokeWidth="1.5"
+                                            markerEnd={isSelected ? "url(#arrow-selected)" : "url(#arrow)"}
+                                            strokeLinecap="round"
                                         />
-                                    )}
 
-                                    {/* Node Shadow / Outer Background */}
-                                    <circle
-                                        r="20"
-                                        fill="#070707"
-                                        stroke={`rgba(${rgbColor}, 0.25)`}
-                                        strokeWidth="1.5"
-                                    />
+                                        {/* Interactive hover/click area */}
+                                        <line
+                                            x1={fromNode.x}
+                                            y1={fromNode.y}
+                                            x2={toNode.x}
+                                            y2={toNode.y}
+                                            stroke="transparent"
+                                            strokeWidth="16"
+                                            strokeLinecap="round"
+                                            style={{ cursor: "pointer" }}
+                                            onClick={(e) => handleEdgeClick(e, edge)}
+                                        />
 
-                                    {/* Node Active Center */}
-                                    <circle
-                                        r="18"
-                                        fill={`rgba(${rgbColor}, 0.08)`}
-                                        stroke={`rgba(${rgbColor}, 0.65)`}
-                                        strokeWidth="1.5"
-                                    />
+                                        {/* Speed & Distance Badge */}
+                                        {(() => {
+                                            const midX = (fromNode.x + toNode.x) / 2;
+                                            const midY = (fromNode.y + toNode.y) / 2;
+                                            const mult = edge.speedMultiplier || 1.0;
+                                            const dist = edge.distance || 10.0;
 
-                                    {/* Node Label */}
-                                    <text
-                                        textAnchor="middle"
-                                        dy=".3em"
-                                        fill="#FFFFFF"
-                                        fontSize="11px"
-                                        fontWeight="700"
-                                        style={{ userSelect: "none" }}
+                                            return (
+                                                <g
+                                                    transform={`translate(${midX}, ${midY})`}
+                                                    style={{ pointerEvents: "none", userSelect: "none" }}
+                                                >
+                                                    <rect
+                                                        x="-28"
+                                                        y="-8"
+                                                        width="56"
+                                                        height="16"
+                                                        rx="4"
+                                                        fill="rgba(7, 7, 7, 0.85)"
+                                                        stroke={isSelected ? "#3B82F6" : "rgba(255, 255, 255, 0.12)"}
+                                                        strokeWidth={isSelected ? "1.5" : "1"}
+                                                    />
+                                                    <text
+                                                        textAnchor="middle"
+                                                        dy=".3em"
+                                                        fontSize="9px"
+                                                        fontWeight="700"
+                                                        fill="#FFFFFF"
+                                                    >
+                                                        <tspan fill={isSelected ? "#3B82F6" : "#10B981"}>{mult.toFixed(1)}x</tspan>
+                                                        <tspan fill="rgba(255, 255, 255, 0.2)"> | </tspan>
+                                                        <tspan fill={isSelected ? "#3B82F6" : "#3B82F6"}>{dist.toFixed(0)}m</tspan>
+                                                    </text>
+                                                </g>
+                                            );
+                                        })()}
+                                    </g>
+                                );
+                            })}
+
+                            {/* Node Elements */}
+                            {nodes.map(node => {
+                                const rgbColor = getNodeColor(node.type);
+                                const isSelected = selectedNodeId === node.id;
+                                const isConnectingStart = connectingStartId === node.id;
+
+                                return (
+                                    <g
+                                        key={node.id}
+                                        transform={`translate(${node.x}, ${node.y})`}
+                                        onMouseDown={(e) => handleNodeMouseDown(e, node)}
+                                        style={{ cursor: isSimulating ? "default" : "grab" }}
                                     >
-                                        {node.label}
-                                    </text>
-                                </g>
-                            );
-                        })}
+                                        {/* Selection Glow */}
+                                        {(isSelected || isConnectingStart) && (
+                                            <circle
+                                                r="26"
+                                                fill="none"
+                                                stroke={isConnectingStart ? "#3B82F6" : `rgb(${rgbColor})`}
+                                                strokeWidth="2"
+                                                strokeDasharray="4 4"
+                                                className="glow-ring"
+                                            />
+                                        )}
 
-                        {/* Animated Vehicles (AGVs) */}
-                        {isSimulating && vehicles.map(vehicle => (
-                            <g key={vehicle.id}>
-                                {/* Vehicle Glow Background */}
-                                <circle
-                                    cx={vehicle.x}
-                                    cy={vehicle.y}
-                                    r="10"
-                                    fill={vehicle.color}
-                                    opacity="0.25"
-                                    style={{ filter: "blur(4px)" }}
-                                />
-                                {/* Vehicle Center */}
-                                <circle
-                                    cx={vehicle.x}
-                                    cy={vehicle.y}
-                                    r="6"
-                                    fill={vehicle.color}
-                                    stroke="#FFFFFF"
-                                    strokeWidth="1.5"
-                                    style={{ boxShadow: "0 0 10px rgba(255,255,255,0.8)" }}
-                                />
-                            </g>
-                        ))}
+                                        {/* Node Shadow / Outer Background */}
+                                        <circle
+                                            r="20"
+                                            fill="#070707"
+                                            stroke={`rgba(${rgbColor}, 0.25)`}
+                                            strokeWidth="1.5"
+                                        />
+
+                                        {/* Node Active Center */}
+                                        <circle
+                                            r="18"
+                                            fill={`rgba(${rgbColor}, 0.08)`}
+                                            stroke={`rgba(${rgbColor}, 0.65)`}
+                                            strokeWidth="1.5"
+                                        />
+
+                                        {/* Node Label */}
+                                        <text
+                                            textAnchor="middle"
+                                            dy=".3em"
+                                            fill="#FFFFFF"
+                                            fontSize="11px"
+                                            fontWeight="700"
+                                            style={{ userSelect: "none" }}
+                                        >
+                                            {node.label}
+                                        </text>
+                                    </g>
+                                );
+                            })}
+
+                            {/* Animated Vehicles (AGVs) */}
+                            {isSimulating && vehicles.map(vehicle => (
+                                <g key={vehicle.id}>
+                                    {/* Vehicle Glow Background */}
+                                    <circle
+                                        cx={vehicle.x}
+                                        cy={vehicle.y}
+                                        r="10"
+                                        fill={vehicle.color}
+                                        opacity="0.25"
+                                        style={{ filter: "blur(4px)" }}
+                                    />
+                                    {/* Vehicle Center */}
+                                    <circle
+                                        cx={vehicle.x}
+                                        cy={vehicle.y}
+                                        r="6"
+                                        fill={vehicle.color}
+                                        stroke="#FFFFFF"
+                                        strokeWidth="1.5"
+                                        style={{ boxShadow: "0 0 10px rgba(255,255,255,0.8)" }}
+                                    />
+                                </g>
+                            ))}
                         </g> {/* End of Transform Group */}
                     </svg>
 
@@ -876,7 +876,7 @@ const CreatePath = () => {
                             <div style={styles.inspectorPanel}>
                                 <div style={styles.inspectorHeader}>
                                     <span style={styles.inspectorTitle}>Segment Properties</span>
-                                    <button 
+                                    <button
                                         style={styles.inspectorCloseBtn}
                                         onClick={() => setSelectedEdgeId(null)}
                                     >
@@ -898,7 +898,7 @@ const CreatePath = () => {
                                         </span>
                                     </div>
                                     <div style={styles.inspectorControl}>
-                                        <input 
+                                        <input
                                             type="range"
                                             min="0.2"
                                             max="3.0"
@@ -915,9 +915,9 @@ const CreatePath = () => {
                                     </div>
                                     <div style={styles.presetButtons}>
                                         {[0.5, 1.0, 1.5, 2.0].map(val => (
-                                            <button 
+                                            <button
                                                 key={val}
-                                                style={styles.presetBtn} 
+                                                style={styles.presetBtn}
                                                 onClick={() => handleUpdateEdgeProp(selectedEdge.id, "speedMultiplier", val)}
                                             >
                                                 {val.toFixed(1)}x
@@ -933,7 +933,7 @@ const CreatePath = () => {
                                         </span>
                                     </div>
                                     <div style={styles.inspectorControl}>
-                                        <input 
+                                        <input
                                             type="range"
                                             min="2"
                                             max="50"
@@ -950,9 +950,9 @@ const CreatePath = () => {
                                     </div>
                                     <div style={styles.presetButtons}>
                                         {[5, 10, 20, 40].map(val => (
-                                            <button 
+                                            <button
                                                 key={val}
-                                                style={styles.presetBtn} 
+                                                style={styles.presetBtn}
                                                 onClick={() => handleUpdateEdgeProp(selectedEdge.id, "distance", val)}
                                             >
                                                 {val}m

@@ -1,19 +1,19 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import styles from "../styles/WarehouseEditorStyles";
-import { 
-  Play, 
-  Square, 
-  ArrowLeft, 
-  Save, 
-  Settings, 
-  Plus, 
-  Edit, 
-  Check, 
-  FileText,
-  Navigation,
-  Activity,
-  Maximize2
+import {
+    Play,
+    Square,
+    ArrowLeft,
+    Save,
+    Settings,
+    Plus,
+    Edit,
+    Check,
+    FileText,
+    Navigation,
+    Activity,
+    Maximize2
 } from "lucide-react";
 
 // Helper for BFS Pathfinding
@@ -24,12 +24,12 @@ const findPath = (start, end, nodes, edges) => {
         const path = queue.shift();
         const current = path[path.length - 1];
         if (current === end) return path;
-        
+
         // Find outbound neighbors
         const neighbors = edges
             .filter(e => e.from === current)
             .map(e => e.to);
-            
+
         for (const neighbor of neighbors) {
             if (!visited.has(neighbor)) {
                 visited.add(neighbor);
@@ -150,11 +150,11 @@ export default function WarehouseEditor() {
                 newEdges.push({
                     id: `e-i-cross-${i}`,
                     from: `i-${i}`,
-                    to: `i-${i+1}`
+                    to: `i-${i + 1}`
                 });
                 newEdges.push({
                     id: `e-i-cross-rev-${i}`,
-                    from: `i-${i+1}`,
+                    from: `i-${i + 1}`,
                     to: `i-${i}`
                 });
             }
@@ -241,7 +241,7 @@ export default function WarehouseEditor() {
         } else {
             const loadingNodes = nodes.filter(n => n.type === "loading");
             const unloadingNodes = nodes.filter(n => n.type === "unloading");
-            
+
             if (loadingNodes.length === 0 || unloadingNodes.length === 0) {
                 alert("Cannot run simulation without loaders/unloaders.");
                 return;
@@ -253,7 +253,7 @@ export default function WarehouseEditor() {
                 const startNode = loadingNodes[i % loadingNodes.length];
                 const endNode = unloadingNodes[Math.floor(Math.random() * unloadingNodes.length)];
                 const path = findPath(startNode.id, endNode.id, nodes, edges);
-                
+
                 if (path) {
                     newVehicles.push({
                         id: `v-fleet-${i}-${Date.now()}`,
@@ -287,7 +287,7 @@ export default function WarehouseEditor() {
                 return prevVehicles.map(veh => {
                     let { path, currentStep, progress, speed } = veh;
                     progress += speed;
-                    
+
                     if (progress >= 1) {
                         progress = 0;
                         currentStep += 1;
@@ -298,7 +298,7 @@ export default function WarehouseEditor() {
                         const unloadingNodes = nodes.filter(n => n.type === "unloading");
                         const startNode = loadingNodes[Math.floor(Math.random() * loadingNodes.length)] || nodes[0];
                         const endNode = unloadingNodes[Math.floor(Math.random() * unloadingNodes.length)] || nodes[nodes.length - 1];
-                        
+
                         const newPath = findPath(startNode.id, endNode.id, nodes, edges);
                         return {
                             ...veh,
@@ -393,7 +393,7 @@ export default function WarehouseEditor() {
                     </div>
 
                     <div style={styles.canvasControls}>
-                        <button 
+                        <button
                             onClick={toggleSimulation}
                             style={{
                                 ...styles.btnPrimary,
@@ -427,13 +427,13 @@ export default function WarehouseEditor() {
                             </pattern>
 
                             {/* Arrow Marker */}
-                            <marker 
-                                id="arrow-blue" 
-                                viewBox="0 0 10 10" 
-                                refX="22" 
-                                refY="5" 
-                                markerWidth="5" 
-                                markerHeight="5" 
+                            <marker
+                                id="arrow-blue"
+                                viewBox="0 0 10 10"
+                                refX="22"
+                                refY="5"
+                                markerWidth="5"
+                                markerHeight="5"
                                 orient="auto-start-reverse"
                             >
                                 <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="rgba(255,255,255,0.2)" />
@@ -487,11 +487,11 @@ export default function WarehouseEditor() {
                                     style={{ cursor: isSimulating ? "default" : "grab" }}
                                 >
                                     {isDragging && (
-                                        <circle 
-                                            r="25" 
-                                            fill="none" 
+                                        <circle
+                                            r="25"
+                                            fill="none"
                                             stroke={`rgb(${rgbColor})`}
-                                            strokeWidth="2" 
+                                            strokeWidth="2"
                                             strokeDasharray="4 4"
                                         />
                                     )}
@@ -586,7 +586,7 @@ export default function WarehouseEditor() {
                             </div>
                             {editLoading ? (
                                 <div style={styles.cardEditRow}>
-                                    <input 
+                                    <input
                                         type="number"
                                         min="1"
                                         max="8"
@@ -613,7 +613,7 @@ export default function WarehouseEditor() {
                             </div>
                             {editUnloading ? (
                                 <div style={styles.cardEditRow}>
-                                    <input 
+                                    <input
                                         type="number"
                                         min="1"
                                         max="8"
@@ -667,7 +667,7 @@ export default function WarehouseEditor() {
                             </div>
                             {editFleet ? (
                                 <div style={styles.cardEditRow}>
-                                    <input 
+                                    <input
                                         type="number"
                                         min="1"
                                         max="6"
@@ -687,7 +687,7 @@ export default function WarehouseEditor() {
                 </div>
 
                 <div style={styles.footerActions}>
-                    <button 
+                    <button
                         style={styles.btnPrimary}
                         onClick={exportConfig}
                     >
@@ -695,7 +695,7 @@ export default function WarehouseEditor() {
                         Export Parameters
                     </button>
 
-                    <button 
+                    <button
                         style={styles.btnSecondary}
                         onClick={() => navigate("/warehouse/create")}
                     >
