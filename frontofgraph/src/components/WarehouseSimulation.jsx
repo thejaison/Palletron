@@ -7,8 +7,44 @@ import {
     ArrowLeft,
     Layers,
     Bot,
-    Edit
+    Edit,
+    Save
 } from "lucide-react";
+
+
+// Generates connection and weight matrices for database representation
+const generateMatrices = (nodesList, edgesList) => {
+    const N = nodesList.length;
+    const connections = Array(N).fill(null).map(() => Array(N).fill("X"));
+    const weights = Array(N).fill(null).map(() => Array(N).fill(0.0));
+
+    // Map node.id to index
+    const nodeIndexMap = {};
+    nodesList.forEach((node, idx) => {
+        nodeIndexMap[node.id] = idx;
+    });
+
+    edgesList.forEach(edge => {
+        const fromIdx = nodeIndexMap[edge.from];
+        const toIdx = nodeIndexMap[edge.to];
+        if (fromIdx !== undefined && toIdx !== undefined) {
+            const fromNode = nodesList[fromIdx];
+            const toNode = nodesList[toIdx];
+
+            // Determine types: L, U, or I
+            const tFrom = fromNode.type[0].toUpperCase();
+            const tTo = toNode.type[0].toUpperCase();
+            connections[fromIdx][toIdx] = `${tFrom}${tTo}`;
+
+            // Calculate weight = distance / speed
+            const distance = edge.distance || 10.0;
+            const speed = edge.speedMultiplier || 1.0;
+            weights[fromIdx][toIdx] = parseFloat((distance / speed).toFixed(2));
+        }
+    });
+
+    return { connections, weights };
+};
 
 // Helper for BFS Pathfinding
 const findPath = (start, end, nodes, edges) => {
@@ -26,13 +62,18 @@ const findPath = (start, end, nodes, edges) => {
 
         for (const neighbor of neighbors) {
             if (!visited.has(neighbor)) {
-                visited.add(neighbor);
-                queue.push([...path, neighbor]);
+                const neighborNode = nodes.find(n => n.id === neighbor);
+                // Robots can only move through intersection nodes.
+                if (neighbor === end || (neighborNode && neighborNode.type === "intersection")) {
+                    visited.add(neighbor);
+                    queue.push([...path, neighbor]);
+                }
             }
         }
     }
     return null;
 };
+
 
 export default function WarehouseSimulation() {
     const navigate = useNavigate();
@@ -41,6 +82,8 @@ export default function WarehouseSimulation() {
     // Key and Session States
     const [plotKey, setPlotKey] = useState(localStorage.getItem("palletron_plot_key") || "");
     const [authError, setAuthError] = useState("");
+    const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
 
     // Graph States
     const [nodes, setNodes] = useState([]);
@@ -57,6 +100,7 @@ export default function WarehouseSimulation() {
     const [isSimulating, setIsSimulating] = useState(false);
     const [vehicles, setVehicles] = useState([]);
     const [vehicleCount, setVehicleCount] = useState(3);
+    const [robotRoutes, setRobotRoutes] = useState([]);
     const animationFrameRef = useRef(null);
 
     // Load data by key on mount
@@ -88,7 +132,27 @@ export default function WarehouseSimulation() {
                 const parsed = JSON.parse(data.canvasData);
                 setNodes(parsed.nodes || []);
                 setEdges(parsed.edges || []);
-                setVehicleCount(parsed.vehicleCount || data.noOfRobots || 3);
+                const count = parsed.vehicleCount || data.noOfRobots || 3;
+                setVehicleCount(count);
+
+                const loadingNodes = (parsed.nodes || []).filter(n => n.type === "loading");
+                const unloadingNodes = (parsed.nodes || []).filter(n => n.type === "unloading");
+                
+                let existingRobots = parsed.robots || [];
+                const updatedRobots = [];
+                for (let i = 0; i < count; i++) {
+                    const existing = existingRobots.find(r => r.id === i);
+                    if (existing) {
+                        updatedRobots.push(existing);
+                    } else {
+                        updatedRobots.push({
+                            id: i,
+                            startNodeId: loadingNodes[i % loadingNodes.length]?.id || "",
+                            endNodeId: unloadingNodes[i % unloadingNodes.length]?.id || ""
+                        });
+                    }
+                }
+                setRobotRoutes(updatedRobots);
             } else {
                 // Not plotted yet, redirect to editor
                 navigate("/editor");
@@ -97,6 +161,7 @@ export default function WarehouseSimulation() {
             setAuthError(err.message);
         }
     };
+
 
     // Toggle simulation
     const toggleSimulation = () => {
@@ -114,8 +179,10 @@ export default function WarehouseSimulation() {
 
             const newVehicles = [];
             for (let i = 0; i < vehicleCount; i++) {
-                const startNode = loadingNodes[i % loadingNodes.length];
-                const endNode = unloadingNodes[Math.floor(Math.random() * unloadingNodes.length)];
+                const route = robotRoutes.find(r => r.id === i) || {};
+                const startNode = nodes.find(n => n.id === route.startNodeId) || loadingNodes[i % loadingNodes.length];
+                const endNode = nodes.find(n => n.id === route.endNodeId) || unloadingNodes[0];
+
                 const path = findPath(startNode.id, endNode.id, nodes, edges);
 
                 if (path) {
@@ -133,7 +200,7 @@ export default function WarehouseSimulation() {
             }
 
             if (newVehicles.length === 0) {
-                alert("No connected paths found from Loading to Unloading points!");
+                alert("No connected paths found from start to end nodes for the configured robots!");
                 return;
             }
 
@@ -146,9 +213,11 @@ export default function WarehouseSimulation() {
     useEffect(() => {
         if (!isSimulating) return;
 
+        let reachedEnd = false;
+
         const updateVehicles = () => {
             setVehicles(prevVehicles => {
-                return prevVehicles.map(veh => {
+                const updated = prevVehicles.map(veh => {
                     let { path, currentStep, progress, speed } = veh;
                     let multiplier = 1.0;
                     let segmentDistance = 10.0;
@@ -171,19 +240,15 @@ export default function WarehouseSimulation() {
                     }
 
                     if (currentStep >= path.length - 1) {
-                        const loadingNodes = nodes.filter(n => n.type === "loading");
-                        const unloadingNodes = nodes.filter(n => n.type === "unloading");
-                        const startNode = loadingNodes[Math.floor(Math.random() * loadingNodes.length)] || nodes[0];
-                        const endNode = unloadingNodes[Math.floor(Math.random() * unloadingNodes.length)] || nodes[nodes.length - 1];
-
-                        const newPath = findPath(startNode.id, endNode.id, nodes, edges);
+                        reachedEnd = true;
+                        // Clamp position to the unloading destination node
+                        const endNode = nodes.find(n => n.id === path[path.length - 1]);
                         return {
                             ...veh,
-                            path: newPath || [startNode.id],
-                            currentStep: 0,
+                            currentStep: path.length - 1,
                             progress: 0,
-                            x: startNode.x,
-                            y: startNode.y
+                            x: endNode ? endNode.x : veh.x,
+                            y: endNode ? endNode.y : veh.y
                         };
                     }
 
@@ -203,7 +268,13 @@ export default function WarehouseSimulation() {
                         y: currentY
                     };
                 });
+                return updated;
             });
+
+            if (reachedEnd) {
+                setIsSimulating(false);
+                return; // Stop animation loop
+            }
 
             animationFrameRef.current = requestAnimationFrame(updateVehicles);
         };
@@ -215,11 +286,49 @@ export default function WarehouseSimulation() {
         };
     }, [isSimulating, nodes, edges]);
 
+
+    const handleRouteChange = (id, field, value) => {
+        setRobotRoutes(prev => prev.map(r => {
+            if (r.id === id) {
+                return { ...r, [field]: value };
+            }
+            return r;
+        }));
+    };
+
+    const saveRobotRoutesToDb = async () => {
+        try {
+            const { connections, weights } = generateMatrices(nodes, edges);
+            const response = await fetch(`http://localhost:8080/api/plots/${encodeURIComponent(plotKey)}/graph`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    connections: JSON.stringify(connections),
+                    weights: JSON.stringify(weights),
+                    canvasData: JSON.stringify({
+                        nodes,
+                        edges,
+                        vehicleCount,
+                        robots: robotRoutes
+                    })
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error("Server rejected save request.");
+            }
+            alert("Robot routes saved successfully to the database!");
+        } catch (err) {
+            alert(`Error saving robot routes: ${err.message}`);
+        }
+    };
+
     const handleLogout = () => {
         localStorage.removeItem("palletron_plot_key");
         setPlotKey("");
         navigate("/");
     };
+
 
     const handleCanvasMouseDown = (e) => {
         setMouseDownPos({ x: e.clientX, y: e.clientY });
@@ -303,7 +412,23 @@ export default function WarehouseSimulation() {
     return (
         <div style={styles.page}>
             {/* Left Panel */}
-            <div style={styles.leftPanel}>
+            <div style={{
+                ...styles.leftPanel,
+                width: isSidebarOpen ? "30%" : "0%",
+                minWidth: isSidebarOpen ? "340px" : "0px",
+                padding: isSidebarOpen ? "40px 30px" : "0px",
+                overflowX: "hidden",
+                overflowY: "auto",
+                transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: "flex-start",
+                gap: "24px",
+                borderRight: isSidebarOpen ? "1px solid rgba(255, 255, 255, 0.05)" : "none",
+                opacity: isSidebarOpen ? 1 : 0,
+                pointerEvents: isSidebarOpen ? "auto" : "none",
+                height: "100%"
+            }}>
                 <div>
                     <div style={styles.brand}>
                         <Layers size={16} />
@@ -344,17 +469,140 @@ export default function WarehouseSimulation() {
                         </div>
                     </div>
                 </div>
+
+                {/* Robot Configuration Section */}
+                <div style={{
+                    marginTop: "12px",
+                    padding: "20px",
+                    background: "rgba(255, 255, 255, 0.02)",
+                    border: "1px solid rgba(255, 255, 255, 0.05)",
+                    borderRadius: "16px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "16px",
+                    flexShrink: 0
+                }}>
+                    <h3 style={{ fontSize: "15px", fontWeight: "600", color: "#10B981", margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+                        <Bot size={15} />
+                        Robot Routing Setup
+                    </h3>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                        {robotRoutes.map((route, idx) => (
+                            <div key={route.id} style={{
+                                background: "rgba(255, 255, 255, 0.01)",
+                                border: "1px solid rgba(255, 255, 255, 0.03)",
+                                borderRadius: "12px",
+                                padding: "12px",
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "8px"
+                            }}>
+                                <span style={{ fontSize: "12px", fontWeight: "600", color: "#FFFFFF" }}>Robot {idx + 1}</span>
+                                <div style={{ display: "flex", gap: "8px" }}>
+                                    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "4px" }}>
+                                        <span style={{ fontSize: "10px", color: "#9CA3AF" }}>Start (Loading)</span>
+                                        <select
+                                            value={route.startNodeId}
+                                            onChange={(e) => handleRouteChange(route.id, "startNodeId", e.target.value)}
+                                            style={{
+                                                background: "#070707",
+                                                border: "1px solid rgba(255, 255, 255, 0.1)",
+                                                borderRadius: "8px",
+                                                padding: "6px",
+                                                color: "#FFFFFF",
+                                                fontSize: "12px",
+                                                outline: "none",
+                                                width: "100%"
+                                            }}
+                                        >
+                                            {nodes.filter(n => n.type === "loading").map(n => (
+                                                <option key={n.id} value={n.id}>{n.label}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "4px" }}>
+                                        <span style={{ fontSize: "10px", color: "#9CA3AF" }}>End (Unloading)</span>
+                                        <select
+                                            value={route.endNodeId}
+                                            onChange={(e) => handleRouteChange(route.id, "endNodeId", e.target.value)}
+                                            style={{
+                                                background: "#070707",
+                                                border: "1px solid rgba(255, 255, 255, 0.1)",
+                                                borderRadius: "8px",
+                                                padding: "6px",
+                                                color: "#FFFFFF",
+                                                fontSize: "12px",
+                                                outline: "none",
+                                                width: "100%"
+                                            }}
+                                        >
+                                            {nodes.filter(n => n.type === "unloading").map(n => (
+                                                <option key={n.id} value={n.id}>{n.label}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    
+                    <button
+                        onClick={saveRobotRoutesToDb}
+                        disabled={isSimulating}
+                        style={{
+                            background: isSimulating ? "rgba(255, 255, 255, 0.02)" : "rgba(16, 185, 129, 0.1)",
+                            border: isSimulating ? "1px solid rgba(255, 255, 255, 0.05)" : "1px solid rgba(16, 185, 129, 0.3)",
+                            color: isSimulating ? "#4B5563" : "#10B981",
+                            borderRadius: "12px",
+                            padding: "10px",
+                            fontSize: "13px",
+                            fontWeight: "600",
+                            cursor: isSimulating ? "not-allowed" : "pointer",
+                            textAlign: "center",
+                            marginTop: "4px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            gap: "6px"
+                        }}
+                    >
+                        <Save size={14} />
+                        Save Robot Routes
+                    </button>
+                </div>
+
             </div>
 
             {/* Right Panel */}
             <div style={styles.rightPanel}>
                 <div style={styles.headerRow}>
-                    <div style={styles.headerInfo}>
-                        <h2 style={styles.headerTitle}>Live Simulation Canvas</h2>
-                        <span style={styles.headerSubtitle}>
-                            {isSimulating ? "Simulation running: AGVs navigating via shortest path" : "Simulation stopped. Click Simulate to start."}
-                        </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+                        <button
+                            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                            style={{
+                                background: "rgba(255, 255, 255, 0.03)",
+                                border: "1px solid rgba(255, 255, 255, 0.08)",
+                                color: "#9CA3AF",
+                                padding: "8px",
+                                borderRadius: "8px",
+                                cursor: "pointer",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                transition: "all 0.2s ease"
+                            }}
+                            title={isSidebarOpen ? "Collapse Sidebar" : "Expand Sidebar"}
+                        >
+                            {isSidebarOpen ? <Layers size={16} style={{ color: "#10B981" }} /> : <Layers size={16} />}
+                        </button>
+                        <div style={styles.headerInfo}>
+                            <h2 style={styles.headerTitle}>Live Simulation Canvas</h2>
+                            <span style={styles.headerSubtitle}>
+                                {isSimulating ? "Simulation running: AGVs navigating via shortest path" : "Simulation stopped. Click Simulate to start."}
+                            </span>
+                        </div>
                     </div>
+
 
                     {/* Toolbar */}
                     <div style={styles.toolbar}>

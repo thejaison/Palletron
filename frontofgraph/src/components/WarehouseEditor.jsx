@@ -160,6 +160,8 @@ export default function WarehouseEditor() {
     const [plotKey, setPlotKey] = useState(localStorage.getItem("palletron_plot_key") || "");
     const [authError, setAuthError] = useState("");
     const [saveStatus, setSaveStatus] = useState("");
+    const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
 
     // Graph States
     const [nodes, setNodes] = useState([]);
@@ -182,6 +184,8 @@ export default function WarehouseEditor() {
     const [mouseDownPos, setMouseDownPos] = useState({ x: 0, y: 0 });
 
     const [vehicleCount, setVehicleCount] = useState(3);
+    const [robotRoutes, setRobotRoutes] = useState([]);
+
 
     // Redirect to root if no key
     useEffect(() => {
@@ -235,6 +239,7 @@ export default function WarehouseEditor() {
                 setNodes(parsed.nodes || []);
                 setEdges(parsed.edges || []);
                 setVehicleCount(parsed.vehicleCount || data.noOfRobots || 3);
+                setRobotRoutes(parsed.robots || []);
             } else {
                 const { nodes: initNodes, edges: initEdges } = generateInitialGraph(
                     data.loadingPoints,
@@ -244,17 +249,32 @@ export default function WarehouseEditor() {
                 setNodes(initNodes);
                 setEdges(initEdges);
                 setVehicleCount(data.noOfRobots || 3);
+                setRobotRoutes([]);
             }
         } catch (err) {
             setAuthError(err.message);
         }
     };
 
+
     // Save full graph representations to the database
     const saveGraphToDatabase = async (key, currentNodes, currentEdges, currentVehicleCount) => {
         try {
             setSaveStatus("Saving...");
             const { connections, weights } = generateMatrices(currentNodes, currentEdges);
+
+            // Self-heal robot routes in case any referenced loading/unloading points were deleted
+            const loadingNodes = currentNodes.filter(n => n.type === "loading");
+            const unloadingNodes = currentNodes.filter(n => n.type === "unloading");
+            const updatedRobots = robotRoutes.map(route => {
+                const hasStart = currentNodes.some(n => n.id === route.startNodeId && n.type === "loading");
+                const hasEnd = currentNodes.some(n => n.id === route.endNodeId && n.type === "unloading");
+                return {
+                    ...route,
+                    startNodeId: hasStart ? route.startNodeId : (loadingNodes[0]?.id || ""),
+                    endNodeId: hasEnd ? route.endNodeId : (unloadingNodes[0]?.id || "")
+                };
+            });
 
             const response = await fetch(`http://localhost:8080/api/plots/${encodeURIComponent(key)}/graph`, {
                 method: "POST",
@@ -265,7 +285,8 @@ export default function WarehouseEditor() {
                     canvasData: JSON.stringify({
                         nodes: currentNodes,
                         edges: currentEdges,
-                        vehicleCount: currentVehicleCount
+                        vehicleCount: currentVehicleCount,
+                        robots: updatedRobots
                     })
                 })
             });
@@ -280,6 +301,7 @@ export default function WarehouseEditor() {
             setTimeout(() => setSaveStatus(""), 5000);
         }
     };
+
 
     const handleDone = async () => {
         await saveGraphToDatabase(plotKey, nodes, edges, vehicleCount);
@@ -509,7 +531,23 @@ export default function WarehouseEditor() {
     return (
         <div style={styles.page}>
             {/* Left Panel */}
-            <div style={styles.leftPanel}>
+            <div style={{
+                ...styles.leftPanel,
+                width: isSidebarOpen ? "30%" : "0%",
+                minWidth: isSidebarOpen ? "340px" : "0px",
+                padding: isSidebarOpen ? "40px 30px" : "0px",
+                overflowX: "hidden",
+                overflowY: "auto",
+                transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: "flex-start",
+                gap: "24px",
+                borderRight: isSidebarOpen ? "1px solid rgba(255, 255, 255, 0.05)" : "none",
+                opacity: isSidebarOpen ? 1 : 0,
+                pointerEvents: isSidebarOpen ? "auto" : "none",
+                height: "100%"
+            }}>
                 <div>
                     <div style={styles.brand}>
                         <Layers size={16} />
@@ -555,12 +593,33 @@ export default function WarehouseEditor() {
             {/* Right Panel */}
             <div style={styles.rightPanel}>
                 <div style={styles.headerRow}>
-                    <div style={styles.headerInfo}>
-                        <h2 style={styles.headerTitle}>Interactive Plotting Canvas</h2>
-                        <span style={styles.headerSubtitle}>
-                            Drag nodes to place. Select tool options below to draw paths.
-                        </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+                        <button
+                            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                            style={{
+                                background: "rgba(255, 255, 255, 0.03)",
+                                border: "1px solid rgba(255, 255, 255, 0.08)",
+                                color: "#9CA3AF",
+                                padding: "8px",
+                                borderRadius: "8px",
+                                cursor: "pointer",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                transition: "all 0.2s ease"
+                            }}
+                            title={isSidebarOpen ? "Collapse Sidebar" : "Expand Sidebar"}
+                        >
+                            {isSidebarOpen ? <Layers size={16} style={{ color: "#3B82F6" }} /> : <Layers size={16} />}
+                        </button>
+                        <div style={styles.headerInfo}>
+                            <h2 style={styles.headerTitle}>Interactive Plotting Canvas</h2>
+                            <span style={styles.headerSubtitle}>
+                                Drag nodes to place. Select tool options below to draw paths.
+                            </span>
+                        </div>
                     </div>
+
 
                     {/* Toolbar */}
                     <div style={styles.toolbar}>
