@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import styles from "../styles/CreatePathStyles";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import {
     Play,
     Square,
@@ -13,7 +13,8 @@ import {
     Layers,
     Sparkles,
     HelpCircle,
-    Bot
+    Bot,
+    Save
 } from "lucide-react";
 
 // Helper for BFS Pathfinding
@@ -40,25 +41,155 @@ const findPath = (start, end, nodes, edges) => {
     return null;
 };
 
+// Generates connection and weight matrices for database representation
+const generateMatrices = (nodesList, edgesList) => {
+    const N = nodesList.length;
+    const connections = Array(N).fill(null).map(() => Array(N).fill("X"));
+    const weights = Array(N).fill(null).map(() => Array(N).fill(0.0));
+
+    // Map node.id to index
+    const nodeIndexMap = {};
+    nodesList.forEach((node, idx) => {
+        nodeIndexMap[node.id] = idx;
+    });
+
+    edgesList.forEach(edge => {
+        const fromIdx = nodeIndexMap[edge.from];
+        const toIdx = nodeIndexMap[edge.to];
+        if (fromIdx !== undefined && toIdx !== undefined) {
+            const fromNode = nodesList[fromIdx];
+            const toNode = nodesList[toIdx];
+
+            // Determine types: L, U, or I
+            const tFrom = fromNode.type[0].toUpperCase();
+            const tTo = toNode.type[0].toUpperCase();
+            connections[fromIdx][toIdx] = `${tFrom}${tTo}`;
+
+            // Calculate weight = distance / speed
+            const distance = edge.distance || 10.0;
+            const speed = edge.speedMultiplier || 1.0;
+            weights[fromIdx][toIdx] = parseFloat((distance / speed).toFixed(2));
+        }
+    });
+
+    return { connections, weights };
+};
+
+// Generates initial grid nodes and paths dynamically based on fleet configurations
+const generateInitialGraph = (numL, numU, enableIntersection) => {
+    const newNodes = [];
+    const newEdges = [];
+
+    // 1. Generate Loading Nodes
+    for (let i = 0; i < numL; i++) {
+        const y = 80 + (i + 1) * (340 / (numL + 1));
+        newNodes.push({
+            id: `l-${i}`,
+            label: `L${i + 1}`,
+            x: 180,
+            y: Math.round(y / 10) * 10,
+            type: "loading"
+        });
+    }
+
+    // 2. Generate Unloading Nodes
+    for (let i = 0; i < numU; i++) {
+        const y = 80 + (i + 1) * (340 / (numU + 1));
+        newNodes.push({
+            id: `u-${i}`,
+            label: `U${i + 1}`,
+            x: 580,
+            y: Math.round(y / 10) * 10,
+            type: "unloading"
+        });
+    }
+
+    // 3. Generate Intersections
+    const numI = enableIntersection ? Math.max(2, Math.min(4, Math.floor((numL + numU) / 2))) : 0;
+    for (let i = 0; i < numI; i++) {
+        const y = 80 + (i + 1) * (340 / (numI + 1));
+        newNodes.push({
+            id: `i-${i}`,
+            label: `I${i + 1}`,
+            x: 380,
+            y: Math.round(y / 10) * 10,
+            type: "intersection"
+        });
+    }
+
+    // 4. Create Edges
+    if (enableIntersection && numI > 0) {
+        // Connect loaders to intersections
+        for (let i = 0; i < numL; i++) {
+            const destIdx = i % numI;
+            newEdges.push({
+                id: `e-l-${i}`,
+                from: `l-${i}`,
+                to: `i-${destIdx}`,
+                speedMultiplier: 1.0,
+                distance: 10.0
+            });
+        }
+        // Connect intersections to each other to create crossover pathways
+        for (let i = 0; i < numI - 1; i++) {
+            newEdges.push({
+                id: `e-i-cross-${i}`,
+                from: `i-${i}`,
+                to: `i-${i + 1}`,
+                speedMultiplier: 1.0,
+                distance: 10.0
+            });
+            newEdges.push({
+                id: `e-i-cross-rev-${i}`,
+                from: `i-${i + 1}`,
+                to: `i-${i}`,
+                speedMultiplier: 1.0,
+                distance: 10.0
+            });
+        }
+        // Connect intersections to unloaders
+        for (let i = 0; i < numI; i++) {
+            const destIdx = i % numU;
+            newEdges.push({
+                id: `e-i-${i}`,
+                from: `i-${i}`,
+                to: `u-${destIdx}`,
+                speedMultiplier: 1.0,
+                distance: 10.0
+            });
+        }
+    } else {
+        // Direct connections from loader to unloader
+        for (let i = 0; i < numL; i++) {
+            const destIdx = i % numU;
+            newEdges.push({
+                id: `e-direct-${i}`,
+                from: `l-${i}`,
+                to: `u-${destIdx}`,
+                speedMultiplier: 1.0,
+                distance: 10.0
+            });
+        }
+    }
+
+    return { nodes: newNodes, edges: newEdges };
+};
+
 const CreatePath = () => {
     const navigate = useNavigate();
+    const location = useLocation();
     const svgRef = useRef(null);
 
-    // Graph States
-    const [nodes, setNodes] = useState([
-        { id: "n1", label: "L1", x: 180, y: 150, type: "loading" },
-        { id: "n2", label: "L2", x: 180, y: 350, type: "loading" },
-        { id: "n3", label: "I1", x: 380, y: 250, type: "intersection" },
-        { id: "n4", label: "U1", x: 580, y: 150, type: "unloading" },
-        { id: "n5", label: "U2", x: 580, y: 350, type: "unloading" }
-    ]);
+    // Key and Session States
+    const [plotKey, setPlotKey] = useState(localStorage.getItem("palletron_plot_key") || "");
+    const [keyInput, setKeyInput] = useState("");
+    const [tempKeyMessage, setTempKeyMessage] = useState("");
+    const [authError, setAuthError] = useState("");
+    const [saveStatus, setSaveStatus] = useState("");
 
-    const [edges, setEdges] = useState([
-        { id: "e1", from: "n1", to: "n3" },
-        { id: "e2", from: "n2", to: "n3" },
-        { id: "e3", from: "n3", to: "n4" },
-        { id: "e4", from: "n3", to: "n5" }
-    ]);
+    // Graph States
+    const [nodes, setNodes] = useState([]);
+    const [edges, setEdges] = useState([]);
 
     // UI Control States
     const [mode, setMode] = useState("select"); // select, add, connect, delete
@@ -82,6 +213,144 @@ const CreatePath = () => {
     const [vehicleCount, setVehicleCount] = useState(3);
     const animationFrameRef = useRef(null);
 
+    // Hook: fetch database values when plotKey changes
+    useEffect(() => {
+        if (plotKey) {
+            fetchPlotData(plotKey);
+        }
+    }, [plotKey]);
+
+    // Hook: check for configuration redirection parameters from /warehouse/create
+    useEffect(() => {
+        if (location.state && location.state.regenerate && plotKey) {
+            const { loadingPoints, unloadingPoints, intersection, vehicles } = location.state;
+            const { nodes: initNodes, edges: initEdges } = generateInitialGraph(
+                loadingPoints,
+                unloadingPoints,
+                intersection === "Yes"
+            );
+            setNodes(initNodes);
+            setEdges(initEdges);
+            setVehicleCount(vehicles || 3);
+
+            // Persist the generated graph to the database immediately
+            saveGraphToDatabase(plotKey, initNodes, initEdges, vehicles || 3);
+
+            // Clean the navigation state history
+            navigate(location.pathname, { replace: true });
+        }
+    }, [location.state, plotKey, navigate]);
+
+    // Fetch details and layout by key
+    const fetchPlotData = async (key) => {
+        try {
+            setAuthError("");
+            const response = await fetch(`http://localhost:8080/api/plots/${encodeURIComponent(key)}`);
+            if (!response.ok) {
+                if (response.status === 404) {
+                    throw new Error("Plot key not found. Check character spelling or create a new plot.");
+                }
+                throw new Error("Unable to contact backend server.");
+            }
+            const data = await response.json();
+
+            // If configuration has not been set, redirect to parameters configurator
+            if (data.loadingPoints === undefined || data.loadingPoints === null) {
+                localStorage.setItem("palletron_plot_key", key);
+                setPlotKey(key);
+                navigate("/warehouse/create");
+                return;
+            }
+
+            // If graph data exists, reconstruct, otherwise generate a fresh config grid
+            if (data.canvasData) {
+                const parsed = JSON.parse(data.canvasData);
+                setNodes(parsed.nodes || []);
+                setEdges(parsed.edges || []);
+                setVehicleCount(parsed.vehicleCount || data.noOfRobots || 3);
+            } else {
+                const { nodes: initNodes, edges: initEdges } = generateInitialGraph(
+                    data.loadingPoints,
+                    data.unloadingPoints,
+                    data.intersection === "Yes"
+                );
+                setNodes(initNodes);
+                setEdges(initEdges);
+                setVehicleCount(data.noOfRobots || 3);
+            }
+
+            setPlotKey(key);
+            localStorage.setItem("palletron_plot_key", key);
+        } catch (err) {
+            setAuthError(err.message);
+            setPlotKey("");
+            localStorage.removeItem("palletron_plot_key");
+        }
+    };
+
+    // Generates a new plot key and stores it
+    const handleCreatePlot = async () => {
+        try {
+            setAuthError("");
+            setTempKeyMessage("");
+            const response = await fetch("http://localhost:8080/api/plots/create", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" }
+            });
+            if (!response.ok) {
+                throw new Error("Could not communicate with server to create plot.");
+            }
+            const data = await response.json();
+            setTempKeyMessage(data.key);
+            localStorage.setItem("palletron_plot_key", data.key);
+        } catch (err) {
+            setAuthError(err.message);
+        }
+    };
+
+    // Save full graph representations to the database
+    const saveGraphToDatabase = async (key, currentNodes, currentEdges, currentVehicleCount) => {
+        try {
+            setSaveStatus("Saving...");
+            const { connections, weights } = generateMatrices(currentNodes, currentEdges);
+
+            const response = await fetch(`http://localhost:8080/api/plots/${encodeURIComponent(key)}/graph`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    connections: JSON.stringify(connections),
+                    weights: JSON.stringify(weights),
+                    canvasData: JSON.stringify({
+                        nodes: currentNodes,
+                        edges: currentEdges,
+                        vehicleCount: currentVehicleCount
+                    })
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error("Server rejected save request.");
+            }
+            setSaveStatus("Saved Plot!");
+            setTimeout(() => setSaveStatus(""), 3000);
+        } catch (err) {
+            setSaveStatus(`Save Error: ${err.message}`);
+            setTimeout(() => setSaveStatus(""), 5000);
+        }
+    };
+
+    // Logout session handler
+    const handleLogout = () => {
+        localStorage.removeItem("palletron_plot_key");
+        setPlotKey("");
+        setTempKeyMessage("");
+        setKeyInput("");
+        setNodes([]);
+        setEdges([]);
+        setVehicles([]);
+        setIsSimulating(false);
+    };
+
     // Node colors helper
     const getNodeColor = (type) => {
         switch (type) {
@@ -98,6 +367,9 @@ const CreatePath = () => {
             setIsSimulating(false);
             setVehicles([]);
         } else {
+            // Auto-save map before simulation start
+            saveGraphToDatabase(plotKey, nodes, edges, vehicleCount);
+
             // Find all loading and unloading nodes
             const loadingNodes = nodes.filter(n => n.type === "loading");
             const unloadingNodes = nodes.filter(n => n.type === "unloading");
@@ -444,6 +716,85 @@ const CreatePath = () => {
         };
     }, [zoom, panOffset]);
 
+    if (!plotKey) {
+        return (
+            <div style={styles.landingPage}>
+                <div style={styles.landingCard}>
+                    <div style={styles.landingBrand}>
+                        <Layers size={18} />
+                        Palletron UI
+                    </div>
+                    
+                    <h2 style={styles.landingTitle}>Warehouse Logistics Manager</h2>
+                    <p style={styles.landingSubtitle}>Save, restore, and simulate AGV warehouse fleets with a secure key.</p>
+
+                    {authError && (
+                        <div style={{ background: "rgba(239, 68, 68, 0.1)", border: "1px solid rgba(239, 68, 68, 0.2)", borderRadius: "12px", padding: "12px", color: "#FCA5A5", fontSize: "13px", textAlign: "center" }}>
+                            {authError}
+                        </div>
+                    )}
+
+                    {tempKeyMessage ? (
+                        <div style={styles.keyAlert}>
+                            <span style={styles.keyAlertWarning}>Remember This Key!</span>
+                            <span style={styles.keyAlertValue}>{tempKeyMessage}</span>
+                            <p style={{ fontSize: "11px", color: "#9CA3AF", marginTop: "4px" }}>
+                                It is your responsibility to remember this key. Share or re-enter it to access this plot representation.
+                            </p>
+                            <button
+                                style={{ ...styles.landingBtnPrimary, marginTop: "12px" }}
+                                onClick={() => {
+                                    setPlotKey(tempKeyMessage);
+                                }}
+                            >
+                                Proceed to Configure Fleet
+                                <ArrowRight size={16} />
+                            </button>
+                        </div>
+                    ) : (
+                        <>
+                            <div style={styles.inputGroup}>
+                                <label style={styles.landingLabel}>Enter Existing Plot Key</label>
+                                <input
+                                    style={styles.landingInput}
+                                    type="text"
+                                    placeholder="e.g. 6%3FH$"
+                                    value={keyInput}
+                                    onChange={(e) => setKeyInput(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter") fetchPlotData(keyInput);
+                                    }}
+                                />
+                            </div>
+
+                            <button
+                                style={styles.landingBtnPrimary}
+                                onClick={() => fetchPlotData(keyInput)}
+                                disabled={!keyInput.trim()}
+                            >
+                                Enter Key
+                            </button>
+
+                            <div style={styles.dividerRow}>
+                                <div style={styles.dividerLine}></div>
+                                <span>OR</span>
+                                <div style={styles.dividerLine}></div>
+                            </div>
+
+                            <button
+                                style={styles.landingBtnSecondary}
+                                onClick={handleCreatePlot}
+                            >
+                                <Plus size={16} />
+                                Create a Plot
+                            </button>
+                        </>
+                    )}
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div style={styles.page}>
             {/* Left Panel */}
@@ -575,6 +926,22 @@ const CreatePath = () => {
 
                         <div style={styles.toolDivider} />
 
+                        <button
+                            onClick={() => saveGraphToDatabase(plotKey, nodes, edges, vehicleCount)}
+                            style={{
+                                ...styles.toolButton,
+                                background: "rgba(59, 130, 246, 0.1)",
+                                border: "1px solid rgba(59, 130, 246, 0.3)",
+                                color: "#3B82F6",
+                                fontWeight: "bold"
+                            }}
+                        >
+                            <Save size={14} />
+                            {saveStatus ? saveStatus : "Save Plot"}
+                        </button>
+
+                        <div style={styles.toolDivider} />
+
                         <div style={styles.vehicleCountContainer} title="Configure number of robots to simulate">
                             <Bot size={14} style={{ color: "#9CA3AF" }} />
                             <span style={styles.vehicleCountLabel}>Robots:</span>
@@ -611,6 +978,24 @@ const CreatePath = () => {
                         >
                             Configure Fleet
                             <ArrowRight size={14} />
+                        </button>
+
+                        <div style={styles.toolDivider} />
+
+                        <span style={{ fontSize: "12px", color: "#10B981", background: "rgba(16, 185, 129, 0.1)", padding: "6px 12px", borderRadius: "8px", fontWeight: "bold" }}>
+                            KEY: {plotKey}
+                        </span>
+
+                        <button
+                            onClick={handleLogout}
+                            style={{
+                                ...styles.toolButton,
+                                background: "rgba(239, 68, 68, 0.1)",
+                                border: "1px solid rgba(239, 68, 68, 0.3)",
+                                color: "#EF4444"
+                            }}
+                        >
+                            Logout
                         </button>
                     </div>
                 </div>

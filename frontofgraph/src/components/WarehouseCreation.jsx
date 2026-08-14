@@ -1,10 +1,12 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import styles from "../styles/WarehouseCreationStyles";
 import { Layers, ArrowRight, ArrowLeft } from "lucide-react";
 
 export default function WarehouseCreation() {
     const navigate = useNavigate();
+    const [plotKey, setPlotKey] = useState(localStorage.getItem("palletron_plot_key") || "");
+    const [error, setError] = useState("");
 
     const [data, setData] = useState({
         loadingPoints: "3",
@@ -13,6 +15,16 @@ export default function WarehouseCreation() {
         vehicles: "3"
     });
 
+    useEffect(() => {
+        if (!plotKey) {
+            setError("No active plot key found. Redirecting to start page in 3 seconds...");
+            const timer = setTimeout(() => {
+                navigate("/");
+            }, 3000);
+            return () => clearTimeout(timer);
+        }
+    }, [plotKey, navigate]);
+
     const handleChange = (e) => {
         setData({
             ...data,
@@ -20,10 +32,45 @@ export default function WarehouseCreation() {
         });
     };
 
-    const handleContinue = () => {
-        navigate("/warehouse/editor", {
-            state: data
-        });
+    const handleContinue = async () => {
+        if (!plotKey) {
+            setError("Cannot configure: Plot key is missing.");
+            return;
+        }
+
+        try {
+            setError("");
+            const response = await fetch(`http://localhost:8080/api/plots/${encodeURIComponent(plotKey)}/configure`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    loadingPoints: data.loadingPoints,
+                    unloadingPoints: data.unloadingPoints,
+                    intersection: data.intersection,
+                    vehicles: data.vehicles
+                })
+            });
+
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.error || "Failed to save configuration.");
+            }
+
+            // Navigate to editor to generate and show the canvas
+            navigate("/editor", {
+                state: {
+                    regenerate: true,
+                    loadingPoints: parseInt(data.loadingPoints),
+                    unloadingPoints: parseInt(data.unloadingPoints),
+                    intersection: data.intersection,
+                    vehicles: parseInt(data.vehicles)
+                }
+            });
+        } catch (err) {
+            setError(err.message);
+        }
     };
 
     return (
@@ -46,19 +93,19 @@ export default function WarehouseCreation() {
                 </div>
 
                 <div style={styles.stepsContainer}>
-                    <div style={styles.step} onClick={() => navigate("/")}>
-                        <div style={styles.stepNumber}>✓</div>
-                        <div style={styles.stepTextContainer}>
-                            <span style={styles.stepTitle}>Create Nodes</span>
-                            <span style={styles.stepDesc}>Structure loaders & unloaders</span>
-                        </div>
-                    </div>
-
                     <div style={styles.activeStep}>
-                        <div style={styles.stepNumber}>2</div>
+                        <div style={styles.stepNumber}>1</div>
                         <div style={styles.stepTextContainer}>
                             <span style={styles.stepTitle}>Configure Fleet</span>
                             <span style={styles.stepDesc}>Setup counts & parameters</span>
+                        </div>
+                    </div>
+
+                    <div style={styles.step}>
+                        <div style={styles.inactiveStepNumber}>2</div>
+                        <div style={styles.stepTextContainer}>
+                            <span style={styles.stepTitle}>Create Nodes</span>
+                            <span style={styles.stepDesc}>Structure loaders, unloaders & intersections</span>
                         </div>
                     </div>
 
@@ -75,10 +122,23 @@ export default function WarehouseCreation() {
             {/* Right Panel */}
             <div style={styles.rightPanel}>
                 <div style={styles.formCard}>
-                    <h2 style={styles.heading}>Parameters</h2>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <h2 style={styles.heading}>Parameters</h2>
+                        {plotKey && (
+                            <span style={{ fontSize: "11px", color: "#10B981", background: "rgba(16, 185, 129, 0.1)", padding: "4px 8px", borderRadius: "6px", fontWeight: "bold" }}>
+                                KEY: {plotKey}
+                            </span>
+                        )}
+                    </div>
                     <p style={styles.formDesc}>
                         Define custom limits for nodes and vehicles. We will generate the grid dynamically.
                     </p>
+
+                    {error && (
+                        <div style={{ background: "rgba(239, 68, 68, 0.1)", border: "1px solid rgba(239, 68, 68, 0.2)", borderRadius: "8px", padding: "12px", color: "#FCA5A5", fontSize: "13px", marginBottom: "16px" }}>
+                            {error}
+                        </div>
+                    )}
 
                     <div style={styles.field}>
                         <label style={styles.label}>Loading Points</label>
