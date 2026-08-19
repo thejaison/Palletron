@@ -143,12 +143,16 @@ export default function WarehouseSimulation() {
                 for (let i = 0; i < count; i++) {
                     const existing = existingRobots.find(r => r.id === i);
                     if (existing) {
-                        updatedRobots.push(existing);
+                        updatedRobots.push({
+                            ...existing,
+                            speedCmPerSec: existing.speedCmPerSec || 50
+                        });
                     } else {
                         updatedRobots.push({
                             id: i,
                             startNodeId: loadingNodes[i % loadingNodes.length]?.id || "",
-                            endNodeId: unloadingNodes[i % unloadingNodes.length]?.id || ""
+                            endNodeId: unloadingNodes[i % unloadingNodes.length]?.id || "",
+                            speedCmPerSec: 50
                         });
                     }
                 }
@@ -191,7 +195,7 @@ export default function WarehouseSimulation() {
                         path,
                         currentStep: 0,
                         progress: 0,
-                        speed: 0.015 + Math.random() * 0.01,
+                        speedCmPerSec: route.speedCmPerSec || 50,
                         color: `hsl(${200 + i * 40}, 90%, 60%)`,
                         x: startNode.x,
                         y: startNode.y
@@ -218,9 +222,8 @@ export default function WarehouseSimulation() {
         const updateVehicles = () => {
             setVehicles(prevVehicles => {
                 const updated = prevVehicles.map(veh => {
-                    let { path, currentStep, progress, speed } = veh;
-                    let multiplier = 1.0;
-                    let segmentDistance = 10.0;
+                    let { path, currentStep, progress, speedCmPerSec } = veh;
+                    let segmentDistance = 1000.0;
                     if (currentStep < path.length - 1) {
                         const fromId = path[currentStep];
                         const toId = path[currentStep + 1];
@@ -228,11 +231,10 @@ export default function WarehouseSimulation() {
                             (e.from === fromId && e.to === toId) ||
                             (e.from === toId && e.to === fromId)
                         );
-                        multiplier = currentEdge?.speedMultiplier || 1.0;
-                        segmentDistance = currentEdge?.distance || 10.0;
+                        segmentDistance = currentEdge?.distance || 1000.0;
                     }
 
-                    progress += (speed * multiplier) / (segmentDistance / 10.0);
+                    progress += (speedCmPerSec || 50) / (60 * segmentDistance);
 
                     if (progress >= 1) {
                         progress = 0;
@@ -542,6 +544,26 @@ export default function WarehouseSimulation() {
                                         </select>
                                     </div>
                                 </div>
+                                <div style={{ display: "flex", flexDirection: "column", gap: "4px", marginTop: "4px" }}>
+                                    <span style={{ fontSize: "10px", color: "#9CA3AF" }}>Robot Speed (cm/sec)</span>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        max="500"
+                                        value={route.speedCmPerSec || 50}
+                                        onChange={(e) => handleRouteChange(route.id, "speedCmPerSec", parseFloat(e.target.value) || 0)}
+                                        style={{
+                                            background: "#070707",
+                                            border: "1px solid rgba(255, 255, 255, 0.1)",
+                                            borderRadius: "8px",
+                                            padding: "6px",
+                                            color: "#FFFFFF",
+                                            fontSize: "12px",
+                                            outline: "none",
+                                            width: "100%"
+                                        }}
+                                    />
+                                </div>
                             </div>
                         ))}
                     </div>
@@ -716,11 +738,10 @@ export default function WarehouseSimulation() {
                                             strokeLinecap="round"
                                         />
 
-                                        {/* Speed & Distance Badge */}
+                                        {/* Distance Badge */}
                                         {(() => {
                                             const midX = (fromNode.x + toNode.x) / 2;
                                             const midY = (fromNode.y + toNode.y) / 2;
-                                            const mult = edge.speedMultiplier || 1.0;
                                             const dist = edge.distance || 10.0;
 
                                             return (
@@ -729,9 +750,9 @@ export default function WarehouseSimulation() {
                                                     style={{ pointerEvents: "none", userSelect: "none" }}
                                                 >
                                                     <rect
-                                                        x="-28"
+                                                        x="-24"
                                                         y="-8"
-                                                        width="56"
+                                                        width="48"
                                                         height="16"
                                                         rx="4"
                                                         fill="rgba(7, 7, 7, 0.85)"
@@ -745,9 +766,7 @@ export default function WarehouseSimulation() {
                                                         fontWeight="700"
                                                         fill="#FFFFFF"
                                                     >
-                                                        <tspan fill="#10B981">{mult.toFixed(1)}x</tspan>
-                                                        <tspan fill="rgba(255, 255, 255, 0.2)"> | </tspan>
-                                                        <tspan fill="#3B82F6">{dist.toFixed(0)}m</tspan>
+                                                        <tspan fill="#3B82F6">{dist.toFixed(0)}cm</tspan>
                                                     </text>
                                                 </g>
                                             );

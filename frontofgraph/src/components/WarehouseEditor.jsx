@@ -41,10 +41,9 @@ const generateMatrices = (nodesList, edgesList) => {
             const tTo = toNode.type[0].toUpperCase();
             connections[fromIdx][toIdx] = `${tFrom}${tTo}`;
 
-            // Calculate weight = distance / speed
+            // Calculate weight = distance
             const distance = edge.distance || 10.0;
-            const speed = edge.speedMultiplier || 1.0;
-            weights[fromIdx][toIdx] = parseFloat((distance / speed).toFixed(2));
+            weights[fromIdx][toIdx] = parseFloat(distance.toFixed(2));
         }
     });
 
@@ -103,7 +102,7 @@ const generateInitialGraph = (numL, numU, enableIntersection) => {
                 from: `l-${i}`,
                 to: `i-${destIdx}`,
                 speedMultiplier: 1.0,
-                distance: 10.0
+                distance: 1000
             });
         }
         // Connect intersections to each other to create crossover pathways
@@ -113,14 +112,14 @@ const generateInitialGraph = (numL, numU, enableIntersection) => {
                 from: `i-${i}`,
                 to: `i-${i + 1}`,
                 speedMultiplier: 1.0,
-                distance: 10.0
+                distance: 1000
             });
             newEdges.push({
                 id: `e-i-cross-rev-${i}`,
                 from: `i-${i + 1}`,
                 to: `i-${i}`,
                 speedMultiplier: 1.0,
-                distance: 10.0
+                distance: 1000
             });
         }
         // Connect intersections to unloaders
@@ -131,7 +130,7 @@ const generateInitialGraph = (numL, numU, enableIntersection) => {
                 from: `i-${i}`,
                 to: `u-${destIdx}`,
                 speedMultiplier: 1.0,
-                distance: 10.0
+                distance: 1000
             });
         }
     } else {
@@ -143,7 +142,7 @@ const generateInitialGraph = (numL, numU, enableIntersection) => {
                 from: `l-${i}`,
                 to: `u-${destIdx}`,
                 speedMultiplier: 1.0,
-                distance: 10.0
+                distance: 1000
             });
         }
     }
@@ -403,7 +402,7 @@ export default function WarehouseEditor() {
                             from: connectingStartId,
                             to: node.id,
                             speedMultiplier: 1.0,
-                            distance: 10.0
+                            distance: 1000
                         }]);
                     }
                 }
@@ -865,7 +864,6 @@ export default function WarehouseEditor() {
                                         {(() => {
                                             const midX = (fromNode.x + toNode.x) / 2;
                                             const midY = (fromNode.y + toNode.y) / 2;
-                                            const mult = edge.speedMultiplier || 1.0;
                                             const dist = edge.distance || 10.0;
 
                                             return (
@@ -874,9 +872,9 @@ export default function WarehouseEditor() {
                                                     style={{ pointerEvents: "none", userSelect: "none" }}
                                                 >
                                                     <rect
-                                                        x="-28"
+                                                        x="-24"
                                                         y="-8"
-                                                        width="56"
+                                                        width="48"
                                                         height="16"
                                                         rx="4"
                                                         fill="rgba(7, 7, 7, 0.85)"
@@ -890,9 +888,7 @@ export default function WarehouseEditor() {
                                                         fontWeight="700"
                                                         fill="#FFFFFF"
                                                     >
-                                                        <tspan fill={isSelected ? "#3B82F6" : "#10B981"}>{mult.toFixed(1)}x</tspan>
-                                                        <tspan fill="rgba(255, 255, 255, 0.2)"> | </tspan>
-                                                        <tspan fill={isSelected ? "#3B82F6" : "#3B82F6"}>{dist.toFixed(0)}m</tspan>
+                                                        <tspan fill={isSelected ? "#3B82F6" : "#3B82F6"}>{dist.toFixed(0)}cm</tspan>
                                                     </text>
                                                 </g>
                                             );
@@ -979,70 +975,37 @@ export default function WarehouseEditor() {
                                             {fromNode ? fromNode.label : "?"} ➔ {toNode ? toNode.label : "?"}
                                         </span>
                                     </div>
-                                    <div style={styles.inspectorRow}>
-                                        <span style={styles.inspectorLabel}>Robot Speed</span>
-                                        <span style={{ ...styles.inspectorValue, color: "#10B981" }}>
-                                            {(selectedEdge.speedMultiplier || 1.0).toFixed(1)}x
-                                        </span>
-                                    </div>
-                                    <div style={styles.inspectorControl}>
-                                        <input
-                                            type="range"
-                                            min="0.2"
-                                            max="3.0"
-                                            step="0.1"
-                                            value={selectedEdge.speedMultiplier || 1.0}
-                                            onChange={(e) => handleUpdateEdgeProp(selectedEdge.id, "speedMultiplier", parseFloat(e.target.value))}
-                                            style={styles.inspectorSlider}
-                                        />
-                                        <div style={styles.sliderLabels}>
-                                            <span>0.2x (Slow)</span>
-                                            <span>1.0x (Normal)</span>
-                                            <span>3.0x (Fast)</span>
-                                        </div>
-                                    </div>
-                                    <div style={styles.presetButtons}>
-                                        {[0.5, 1.0, 1.5, 2.0].map(val => (
-                                            <button
-                                                key={val}
-                                                style={styles.presetBtn}
-                                                onClick={() => handleUpdateEdgeProp(selectedEdge.id, "speedMultiplier", val)}
-                                            >
-                                                {val.toFixed(1)}x
-                                            </button>
-                                        ))}
-                                    </div>
 
                                     <div style={{ ...styles.inspectorRow, marginTop: "8px" }}>
                                         <span style={styles.inspectorLabel}>Path Distance</span>
                                         <span style={{ ...styles.inspectorValue, color: "#3B82F6" }}>
-                                            {selectedEdge.distance || 10} meters
+                                            {selectedEdge.distance || 1000} cm
                                         </span>
                                     </div>
                                     <div style={styles.inspectorControl}>
                                         <input
                                             type="range"
-                                            min="2"
-                                            max="50"
-                                            step="1"
-                                            value={selectedEdge.distance || 10}
+                                            min="100"
+                                            max="5000"
+                                            step="50"
+                                            value={selectedEdge.distance || 1000}
                                             onChange={(e) => handleUpdateEdgeProp(selectedEdge.id, "distance", parseInt(e.target.value))}
                                             style={styles.inspectorSliderDistance}
                                         />
                                         <div style={styles.sliderLabels}>
-                                            <span>2m</span>
-                                            <span>10m (Default)</span>
-                                            <span>50m</span>
+                                            <span>100cm</span>
+                                            <span>1000cm (Default)</span>
+                                            <span>5000cm</span>
                                         </div>
                                     </div>
                                     <div style={styles.presetButtons}>
-                                        {[5, 10, 20, 40].map(val => (
+                                        {[500, 1000, 2000, 4000].map(val => (
                                             <button
                                                 key={val}
                                                 style={styles.presetBtn}
                                                 onClick={() => handleUpdateEdgeProp(selectedEdge.id, "distance", val)}
                                             >
-                                                {val}m
+                                                {val}cm
                                             </button>
                                         ))}
                                     </div>
