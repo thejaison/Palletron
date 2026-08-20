@@ -8,7 +8,9 @@ import {
     Layers,
     Bot,
     Edit,
-    Save
+    Save,
+    Terminal,
+    Trash2
 } from "lucide-react";
 
 
@@ -34,12 +36,15 @@ const generateMatrices = (nodesList, edgesList) => {
             // Determine types: L, U, or I
             const tFrom = fromNode.type[0].toUpperCase();
             const tTo = toNode.type[0].toUpperCase();
-            connections[fromIdx][toIdx] = `${tFrom}${tTo}`;
 
-            // Calculate weight = distance / speed
+            // Populate from -> to direction
+            connections[fromIdx][toIdx] = `${tFrom}${tTo}`;
             const distance = edge.distance || 10.0;
-            const speed = edge.speedMultiplier || 1.0;
-            weights[fromIdx][toIdx] = parseFloat((distance / speed).toFixed(2));
+            weights[fromIdx][toIdx] = parseFloat(distance.toFixed(2));
+
+            // Populate to -> from direction (bidirectional)
+            connections[toIdx][fromIdx] = `${tTo}${tFrom}`;
+            weights[toIdx][fromIdx] = parseFloat(distance.toFixed(2));
         }
     });
 
@@ -71,7 +76,196 @@ const findPath = (start, end, nodes, edges) => {
             }
         }
     }
-    return null;
+// Helper to generate simulation and path planning terminal logs
+const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
+    const logs = [];
+
+    // 1. Initial planner system logs
+    logs.push({
+        id: `sys-init-1`,
+        time: -0.05,
+        type: "system",
+        text: `Initializing Multi-Robot Logistics Route Planner...`
+    });
+
+    logs.push({
+        id: `sys-init-2`,
+        time: -0.04,
+        type: "system",
+        text: `Active Fleet Count: ${robotRequests.length} automated guided vehicles (AGVs) configured.`
+    });
+
+    // 2. Compute shortest paths and schedule details for each robot
+    plans.forEach((p) => {
+        const req = robotRequests.find(r => r.id === p.id) || {};
+        const startLabel = nodes.find(n => n.id === req.startNodeId)?.label || req.startNodeId;
+        const endLabel = nodes.find(n => n.id === req.endNodeId)?.label || req.endNodeId;
+        
+        // Calculate path distance
+        let pathDist = 0;
+        for (let i = 0; i < p.path.length - 1; i++) {
+            const u = p.path[i];
+            const v = p.path[i+1];
+            const edge = edges.find(e => (e.from === u && e.to === v) || (e.from === v && e.to === u));
+            pathDist += edge?.distance || 10.0;
+        }
+
+        const freeRunTime = req.speedCmPerSec > 0 ? pathDist / req.speedCmPerSec : 0;
+
+        logs.push({
+            id: `plan-r-${p.id}`,
+            time: -0.03,
+            type: "planner",
+            text: `Robot ${p.id + 1} (${startLabel} ➔ ${endLabel}): Route found! Path = [${p.path.map(nid => nodes.find(n => n.id === nid)?.label || nid).join(" ➔ ")}]. Dist = ${pathDist.toFixed(1)}cm. Speed = ${req.speedCmPerSec}cm/s. Free run time = ${freeRunTime.toFixed(2)}s.`
+        });
+    });
+
+    logs.push({
+        id: `sched-init`,
+        time: -0.02,
+        type: "system",
+        text: `Analyzing temporal conflicts (safety margin = 0.50s)...`
+    });
+
+    // 3. Find conflict delays by analyzing wait times
+    plans.forEach(p => {
+        const req = robotRequests.find(r => r.id === p.id) || {};
+        
+        for (let k = 1; k < p.scheduleNodes.length; k++) {
+            const u = p.scheduleNodes[k-1];
+            const v = p.scheduleNodes[k];
+            const edge = edges.find(e => (e.from === u && e.to === v) || (e.from === v && e.to === u));
+            const travelTime = (edge?.distance || 10.0) / (req.speedCmPerSec || 50);
+            
+            const arrPrev = p.scheduleTimes[k-1];
+            const arrNext = p.scheduleTimes[k];
+            const waitTime = arrNext - arrPrev - travelTime;
+
+            if (waitTime > 0.01) {
+                const nodeLabel = nodes.find(n => n.id === u)?.label || u;
+                const nextLabel = nodes.find(n => n.id === v)?.label || v;
+                logs.push({
+                    id: `delay-r-${p.id}-${k}`,
+                    time: -0.01,
+                    type: "scheduler",
+                    text: `Robot ${p.id + 1}: Traffic conflict resolved at ${nodeLabel}. Delaying departure towards ${nextLabel} by ${waitTime.toFixed(2)}s.`
+                });
+            }
+        }
+
+        const totalTime = p.scheduleTimes[p.scheduleTimes.length - 1];
+        let pathDist = 0;
+        for (let i = 0; i < p.path.length - 1; i++) {
+            const u = p.path[i];
+            const v = p.path[i+1];
+            const edge = edges.find(e => (e.from === u && e.to === v) || (e.from === v && e.to === u));
+            pathDist += edge?.distance || 10.0;
+        }
+        const freeRunTime = req.speedCmPerSec > 0 ? pathDist / req.speedCmPerSec : 0;
+        const totalWait = totalTime - freeRunTime;
+
+        if (totalWait > 0.01) {
+            logs.push({
+                id: `wait-summary-r-${p.id}`,
+                time: -0.01,
+                type: "scheduler",
+                text: `Robot ${p.id + 1}: Final schedule arrival pushed to ${totalTime.toFixed(2)}s (total traffic wait: ${totalWait.toFixed(2)}s).`
+            });
+        } else {
+            logs.push({
+                id: `wait-summary-r-${p.id}`,
+                time: -0.01,
+                type: "scheduler",
+                text: `Robot ${p.id + 1}: No traffic conflicts. Scheduled transit time: ${totalTime.toFixed(2)}s.`
+            });
+        }
+    });
+
+    logs.push({
+        id: `sys-ready`,
+        time: -0.005,
+        type: "success",
+        text: `Conflict resolution complete. Simulation ready.`
+    });
+
+    // 4. Create live simulation logs that appear as time t advances
+    plans.forEach(p => {
+        const req = robotRequests.find(r => r.id === p.id) || {};
+        const startLabel = nodes.find(n => n.id === p.scheduleNodes[0])?.label || p.scheduleNodes[0];
+        
+        if (p.scheduleTimes[0] > 0.01) {
+            logs.push({
+                id: `live-start-wait-r-${p.id}`,
+                time: 0.0,
+                type: "info",
+                text: `Robot ${p.id + 1}: Waiting at ${startLabel} for traffic clearance (scheduled departure: ${p.scheduleTimes[0].toFixed(2)}s).`
+            });
+            logs.push({
+                id: `live-depart-r-${p.id}-0`,
+                time: p.scheduleTimes[0],
+                type: "info",
+                text: `Robot ${p.id + 1}: Traffic cleared. Departed ${startLabel} towards ${nodes.find(n => n.id === p.scheduleNodes[1])?.label || p.scheduleNodes[1]}.`
+            });
+        } else {
+            logs.push({
+                id: `live-depart-r-${p.id}-0`,
+                time: 0.0,
+                type: "info",
+                text: `Robot ${p.id + 1}: Departed ${startLabel} towards ${nodes.find(n => n.id === p.scheduleNodes[1])?.label || p.scheduleNodes[1]}.`
+            });
+        }
+
+        // Log intermediate moves and arrivals
+        for (let k = 1; k < p.scheduleNodes.length; k++) {
+            const u = p.scheduleNodes[k-1];
+            const v = p.scheduleNodes[k];
+            const nodeLabel = nodes.find(n => n.id === v)?.label || v;
+            
+            const arrTime = p.scheduleTimes[k];
+            const edge = edges.find(e => (e.from === u && e.to === v) || (e.from === v && e.to === u));
+            const travelTime = (edge?.distance || 10.0) / (req.speedCmPerSec || 50);
+            const depTime = arrTime - travelTime;
+
+            if (k > 1) {
+                const prevArrTime = p.scheduleTimes[k-1];
+                if (depTime > prevArrTime + 0.01) {
+                    const uLabel = nodes.find(n => n.id === u)?.label || u;
+                    logs.push({
+                        id: `live-wait-start-r-${p.id}-${k}`,
+                        time: prevArrTime,
+                        type: "info",
+                        text: `Robot ${p.id + 1}: Arrived at ${uLabel}. Holding position due to traffic occupancy.`
+                    });
+                    logs.push({
+                        id: `live-wait-end-r-${p.id}-${k}`,
+                        time: depTime,
+                        type: "info",
+                        text: `Robot ${p.id + 1}: Cleared to move. Departed ${uLabel} towards ${nodeLabel}.`
+                    });
+                } else {
+                    const uLabel = nodes.find(n => n.id === u)?.label || u;
+                    logs.push({
+                        id: `live-pass-r-${p.id}-${k}`,
+                        time: prevArrTime,
+                        type: "info",
+                        text: `Robot ${p.id + 1}: Passing through ${uLabel} towards ${nodeLabel}.`
+                    });
+                }
+            }
+
+            if (k === p.scheduleNodes.length - 1) {
+                logs.push({
+                    id: `live-dest-r-${p.id}`,
+                    time: arrTime,
+                    type: "success",
+                    text: `Robot ${p.id + 1}: Reached destination ${nodeLabel}! Delivery completed in ${arrTime.toFixed(2)}s.`
+                });
+            }
+        }
+    });
+
+    logs.sort((a, b) => a.time - b.time);
+    return logs;
 };
 
 
@@ -102,6 +296,20 @@ export default function WarehouseSimulation() {
     const [vehicleCount, setVehicleCount] = useState(3);
     const [robotRoutes, setRobotRoutes] = useState([]);
     const animationFrameRef = useRef(null);
+    const maxSimTimeRef = useRef(0);
+
+    // Terminal States
+    const [isTerminalOpen, setIsTerminalOpen] = useState(true);
+    const [activeLogs, setActiveLogs] = useState([]);
+    const terminalLogsRef = useRef([]);
+    const terminalEndRef = useRef(null);
+
+    // Auto-scroll terminal to bottom
+    useEffect(() => {
+        if (terminalEndRef.current) {
+            terminalEndRef.current.scrollIntoView({ behavior: "smooth" });
+        }
+    }, [activeLogs]);
 
     // Load data by key on mount
     useEffect(() => {
@@ -168,10 +376,11 @@ export default function WarehouseSimulation() {
 
 
     // Toggle simulation
-    const toggleSimulation = () => {
+    const toggleSimulation = async () => {
         if (isSimulating) {
             setIsSimulating(false);
             setVehicles([]);
+            setActiveLogs(terminalLogsRef.current.filter(log => log.time < 0));
         } else {
             const loadingNodes = nodes.filter(n => n.type === "loading");
             const unloadingNodes = nodes.filter(n => n.type === "unloading");
@@ -181,110 +390,173 @@ export default function WarehouseSimulation() {
                 return;
             }
 
-            const newVehicles = [];
+            const robotRequests = [];
             for (let i = 0; i < vehicleCount; i++) {
                 const route = robotRoutes.find(r => r.id === i) || {};
                 const startNode = nodes.find(n => n.id === route.startNodeId) || loadingNodes[i % loadingNodes.length];
                 const endNode = nodes.find(n => n.id === route.endNodeId) || unloadingNodes[0];
 
-                const path = findPath(startNode.id, endNode.id, nodes, edges);
+                robotRequests.push({
+                    id: i,
+                    startNodeId: startNode.id,
+                    endNodeId: endNode.id,
+                    speedCmPerSec: route.speedCmPerSec || 50
+                });
+            }
 
-                if (path) {
-                    newVehicles.push({
-                        id: `v-${i}-${Date.now()}`,
-                        path,
-                        currentStep: 0,
-                        progress: 0,
-                        speedCmPerSec: route.speedCmPerSec || 50,
-                        color: `hsl(${200 + i * 40}, 90%, 60%)`,
-                        x: startNode.x,
-                        y: startNode.y
-                    });
+            try {
+                const response = await fetch(`http://localhost:8080/api/plots/${encodeURIComponent(plotKey)}/plan`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(robotRequests)
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.error || "Failed to generate path plan on backend.");
                 }
-            }
 
-            if (newVehicles.length === 0) {
-                alert("No connected paths found from start to end nodes for the configured robots!");
-                return;
-            }
+                const plans = await response.json(); // List of RobotResponse
+                
+                // Verify if any robot has no path found
+                const noPathRobot = plans.find(p => !p.path || p.path.length === 0);
+                if (noPathRobot) {
+                    alert("No connected paths found from start to end nodes for the configured robots!");
+                    return;
+                }
 
-            setVehicles(newVehicles);
-            setIsSimulating(true);
+                const newVehicles = plans.map(p => {
+                    const startNode = nodes.find(n => n.id === p.scheduleNodes[0]);
+                    return {
+                        id: `v-${p.id}-${Date.now()}`,
+                        path: p.path,
+                        scheduleNodes: p.scheduleNodes,
+                        scheduleTimes: p.scheduleTimes,
+                        speedCmPerSec: robotRequests.find(r => r.id === p.id)?.speedCmPerSec || 50,
+                        color: `hsl(${200 + p.id * 40}, 90%, 60%)`,
+                        x: startNode ? startNode.x : 0,
+                        y: startNode ? startNode.y : 0
+                    };
+                });
+
+                maxSimTimeRef.current = Math.max(...newVehicles.map(v => 
+                    v.scheduleTimes && v.scheduleTimes.length > 0 
+                        ? v.scheduleTimes[v.scheduleTimes.length - 1] 
+                        : 0
+                ));
+
+                // Generate terminal logs
+                const generated = generateTerminalLogs(plans, robotRequests, nodes, edges);
+                terminalLogsRef.current = generated;
+                setActiveLogs(generated.filter(log => log.time < 0));
+
+                setVehicles(newVehicles);
+                setIsSimulating(true);
+            } catch (err) {
+                alert(`Error during simulation setup: ${err.message}`);
+            }
         }
     };
 
     // Simulation animation loop
     useEffect(() => {
-        if (!isSimulating) return;
+        if (!isSimulating || vehicles.length === 0) return;
 
-        let reachedEnd = false;
+        const startTime = performance.now();
+        const maxSimTime = maxSimTimeRef.current;
+        let animationFrame;
 
         const updateVehicles = () => {
+            const now = performance.now();
+            const t = (now - startTime) / 1000.0; // elapsed time in seconds
+
+            if (t >= maxSimTime) {
+                setIsSimulating(false);
+                setVehicles(prevVehicles => prevVehicles.map(veh => {
+                    if (!veh.scheduleNodes || veh.scheduleNodes.length === 0) return veh;
+                    const lastNodeId = veh.scheduleNodes[veh.scheduleNodes.length - 1];
+                    const endNode = nodes.find(n => n.id === lastNodeId);
+                    return {
+                        ...veh,
+                        x: endNode ? endNode.x : veh.x,
+                        y: endNode ? endNode.y : veh.y
+                    };
+                }));
+                return;
+            }
+
             setVehicles(prevVehicles => {
                 const updated = prevVehicles.map(veh => {
-                    let { path, currentStep, progress, speedCmPerSec } = veh;
-                    let segmentDistance = 1000.0;
-                    if (currentStep < path.length - 1) {
-                        const fromId = path[currentStep];
-                        const toId = path[currentStep + 1];
-                        const currentEdge = edges.find(e =>
-                            (e.from === fromId && e.to === toId) ||
-                            (e.from === toId && e.to === fromId)
-                        );
-                        segmentDistance = currentEdge?.distance || 1000.0;
-                    }
+                    const { scheduleNodes, scheduleTimes, speedCmPerSec } = veh;
+                    if (!scheduleNodes || scheduleNodes.length === 0) return veh;
 
-                    progress += (speedCmPerSec || 50) / (60 * segmentDistance);
-
-                    if (progress >= 1) {
-                        progress = 0;
-                        currentStep += 1;
-                    }
-
-                    if (currentStep >= path.length - 1) {
-                        reachedEnd = true;
-                        // Clamp position to the unloading destination node
-                        const endNode = nodes.find(n => n.id === path[path.length - 1]);
+                    const lastTime = scheduleTimes[scheduleTimes.length - 1];
+                    if (t >= lastTime) {
+                        const endNode = nodes.find(n => n.id === scheduleNodes[scheduleNodes.length - 1]);
                         return {
                             ...veh,
-                            currentStep: path.length - 1,
-                            progress: 0,
                             x: endNode ? endNode.x : veh.x,
                             y: endNode ? endNode.y : veh.y
                         };
                     }
 
-                    const fromNode = nodes.find(n => n.id === path[currentStep]);
-                    const toNode = nodes.find(n => n.id === path[currentStep + 1]);
+                    // Find which segment we are currently in
+                    let k = 0;
+                    for (let idx = 0; idx < scheduleTimes.length - 1; idx++) {
+                        if (t >= scheduleTimes[idx] && t < scheduleTimes[idx + 1]) {
+                            k = idx;
+                            break;
+                        }
+                    }
+
+                    const fromNodeId = scheduleNodes[k];
+                    const toNodeId = scheduleNodes[k + 1];
+                    const fromNode = nodes.find(n => n.id === fromNodeId);
+                    const toNode = nodes.find(n => n.id === toNodeId);
 
                     if (!fromNode || !toNode) return veh;
 
-                    const currentX = fromNode.x + (toNode.x - fromNode.x) * progress;
-                    const currentY = fromNode.y + (toNode.y - fromNode.y) * progress;
+                    // Look up edge distance
+                    const currentEdge = edges.find(e =>
+                        (e.from === fromNodeId && e.to === toNodeId) ||
+                        (e.from === toNodeId && e.to === fromNodeId)
+                    );
+                    const distance = currentEdge?.distance || 10.0;
+                    const travelTime = distance / speedCmPerSec;
+                    const tArrivalFrom = scheduleTimes[k];
+                    const tArrivalTo = scheduleTimes[k + 1];
+                    const tDepart = tArrivalTo - travelTime;
+
+                    let x = fromNode.x;
+                    let y = fromNode.y;
+
+                    if (t >= tDepart) {
+                        // Robot is moving on the segment
+                        const progress = (t - tDepart) / travelTime;
+                        x = fromNode.x + (toNode.x - fromNode.x) * progress;
+                        y = fromNode.y + (toNode.y - fromNode.y) * progress;
+                    } else {
+                        // Robot is waiting at fromNode due to scheduled traffic delay
+                        x = fromNode.x;
+                        y = fromNode.y;
+                    }
 
                     return {
                         ...veh,
-                        currentStep,
-                        progress,
-                        x: currentX,
-                        y: currentY
+                        x,
+                        y
                     };
                 });
                 return updated;
             });
 
-            if (reachedEnd) {
-                setIsSimulating(false);
-                return; // Stop animation loop
-            }
-
-            animationFrameRef.current = requestAnimationFrame(updateVehicles);
+            animationFrame = requestAnimationFrame(updateVehicles);
         };
 
-        animationFrameRef.current = requestAnimationFrame(updateVehicles);
+        animationFrame = requestAnimationFrame(updateVehicles);
 
         return () => {
-            if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+            if (animationFrame) cancelAnimationFrame(animationFrame);
         };
     }, [isSimulating, nodes, edges]);
 

@@ -39,11 +39,15 @@ const generateMatrices = (nodesList, edgesList) => {
             // Determine types: L, U, or I
             const tFrom = fromNode.type[0].toUpperCase();
             const tTo = toNode.type[0].toUpperCase();
-            connections[fromIdx][toIdx] = `${tFrom}${tTo}`;
 
-            // Calculate weight = distance
+            // Populate from -> to direction
+            connections[fromIdx][toIdx] = `${tFrom}${tTo}`;
             const distance = edge.distance || 10.0;
             weights[fromIdx][toIdx] = parseFloat(distance.toFixed(2));
+
+            // Populate to -> from direction (bidirectional)
+            connections[toIdx][fromIdx] = `${tTo}${tFrom}`;
+            weights[toIdx][fromIdx] = parseFloat(distance.toFixed(2));
         }
     });
 

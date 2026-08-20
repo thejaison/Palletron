@@ -644,6 +644,79 @@ const styles = {
         padding: "8px",
         borderRadius: "8px",
         border: "1px dashed rgba(239, 68, 68, 0.3)",
+    },
+    terminalPanel: {
+        background: "#070707",
+        borderLeft: "1px solid rgba(255, 255, 255, 0.05)",
+        display: "flex",
+        flexDirection: "column",
+        height: "100%",
+        transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+        overflow: "hidden"
+    },
+    terminalHeader: {
+        padding: "16px 20px",
+        borderBottom: "1px solid rgba(255, 255, 255, 0.05)",
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        background: "rgba(255, 255, 255, 0.01)"
+    },
+    terminalTitle: {
+        fontSize: "13px",
+        fontWeight: "700",
+        color: "#10B981",
+        letterSpacing: "1px",
+        textTransform: "uppercase",
+        display: "flex",
+        alignItems: "center",
+        gap: "8px"
+    },
+    terminalControls: {
+        display: "flex",
+        alignItems: "center",
+        gap: "8px"
+    },
+    terminalBody: {
+        flex: 1,
+        padding: "20px",
+        overflowY: "auto",
+        display: "flex",
+        flexDirection: "column",
+        gap: "8px",
+        fontFamily: "'Fira Code', 'Courier New', Courier, monospace",
+        fontSize: "11px",
+        lineHeight: "1.5"
+    },
+    logLine: {
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-all"
+    },
+    logTimestamp: {
+        color: "#4B5563",
+        marginRight: "8px"
+    },
+    logTag: (type) => {
+        let color = "#9CA3AF";
+        if (type === "planner") color = "#10B981";
+        else if (type === "scheduler") color = "#F59E0B";
+        else if (type === "success") color = "#3B82F6";
+        else if (type === "system") color = "#06B6D4";
+        else if (type === "error") color = "#EF4444";
+        return {
+            color,
+            marginRight: "8px",
+            fontWeight: "bold"
+        };
+    },
+    logText: (type) => {
+        let color = "#E5E7EB";
+        if (type === "planner") color = "#A7F3D0";
+        else if (type === "scheduler") color = "#FDE68A";
+        else if (type === "success") color = "#93C5FD";
+        else if (type === "system") color = "#A5F3FC";
+        else if (type === "error") color = "#FCA5A5";
+        return { color };
     }
 };
 

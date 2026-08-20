@@ -1,10 +1,12 @@
 package com.palletron.graph.controller;
 
 import com.palletron.graph.service.MapPlotService;
+import com.palletron.graph.service.RobotPathPlannerService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -14,6 +16,9 @@ public class MapPlotController {
 
     @Autowired
     private MapPlotService mapPlotService;
+
+    @Autowired
+    private RobotPathPlannerService robotPathPlannerService;
 
     @PostMapping("/create")
     public ResponseEntity<?> createPlot(@RequestBody(required = false) Map<String, String> request) {
@@ -62,6 +67,16 @@ public class MapPlotController {
             return ResponseEntity.ok(plotData);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.status(404).body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/{key}/plan")
+    public ResponseEntity<?> planRoutes(@PathVariable("key") String key, @RequestBody List<RobotPathPlannerService.RobotRequest> request) {
+        try {
+            List<RobotPathPlannerService.RobotResponse> response = robotPathPlannerService.planRoutes(key, request);
+            return ResponseEntity.ok(response);
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
