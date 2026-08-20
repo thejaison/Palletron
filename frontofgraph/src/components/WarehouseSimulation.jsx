@@ -76,6 +76,9 @@ const findPath = (start, end, nodes, edges) => {
             }
         }
     }
+    return null;
+};
+
 // Helper to generate simulation and path planning terminal logs
 const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
     const logs = [];
@@ -469,6 +472,9 @@ export default function WarehouseSimulation() {
         const updateVehicles = () => {
             const now = performance.now();
             const t = (now - startTime) / 1000.0; // elapsed time in seconds
+            
+            // Update logs
+            setActiveLogs(terminalLogsRef.current.filter(log => log.time <= t));
 
             if (t >= maxSimTime) {
                 setIsSimulating(false);
@@ -482,6 +488,8 @@ export default function WarehouseSimulation() {
                         y: endNode ? endNode.y : veh.y
                     };
                 }));
+                // Ensure all logs are shown at the end
+                setActiveLogs(terminalLogsRef.current);
                 return;
             }
 
@@ -928,6 +936,14 @@ export default function WarehouseSimulation() {
                             Edit Nodes
                         </button>
 
+                        <button
+                            onClick={() => setIsTerminalOpen(!isTerminalOpen)}
+                            style={isTerminalOpen ? styles.activeToolButton : styles.toolButton}
+                        >
+                            <Terminal size={14} />
+                            Logs
+                        </button>
+
                         <div style={styles.toolDivider} />
 
                         <span style={{ fontSize: "12px", color: "#10B981", background: "rgba(16, 185, 129, 0.1)", padding: "6px 12px", borderRadius: "8px", fontWeight: "bold" }}>
@@ -1130,6 +1146,66 @@ export default function WarehouseSimulation() {
                         <button style={styles.zoomBtn} onClick={() => adjustZoom(1 / 1.15)} title="Zoom Out">-</button>
                         <button style={{ ...styles.zoomBtn, fontSize: "10px", width: "auto", padding: "0 8px" }} onClick={resetZoom} title="Reset view">Reset</button>
                     </div>
+                </div>
+            </div>
+
+            {/* Terminal Panel */}
+            <div style={{
+                ...styles.terminalPanel,
+                width: isTerminalOpen ? "25%" : "0%",
+                minWidth: isTerminalOpen ? "320px" : "0px",
+                opacity: isTerminalOpen ? 1 : 0,
+                pointerEvents: isTerminalOpen ? "auto" : "none"
+            }}>
+                <div style={styles.terminalHeader}>
+                    <div style={styles.terminalTitle}>
+                        <Terminal size={14} />
+                        System Logs
+                    </div>
+                    <div style={styles.terminalControls}>
+                        <button
+                            onClick={() => setActiveLogs([])}
+                            style={{
+                                background: "transparent",
+                                border: "none",
+                                color: "#9CA3AF",
+                                cursor: "pointer",
+                                padding: "4px"
+                            }}
+                            title="Clear Logs"
+                        >
+                            <Trash2 size={14} />
+                        </button>
+                        <button
+                            onClick={() => setIsTerminalOpen(false)}
+                            style={{
+                                background: "transparent",
+                                border: "none",
+                                color: "#9CA3AF",
+                                cursor: "pointer",
+                                padding: "4px"
+                            }}
+                            title="Close Terminal"
+                        >
+                            <Square size={14} />
+                        </button>
+                    </div>
+                </div>
+                <div style={styles.terminalBody}>
+                    {activeLogs.map((log, i) => (
+                        <div key={`${log.id}-${i}`} style={styles.logLine}>
+                            <span style={styles.logTimestamp}>
+                                [{Math.max(0, log.time).toFixed(2)}s]
+                            </span>
+                            <span style={styles.logTag(log.type)}>
+                                [{log.type.toUpperCase()}]
+                            </span>
+                            <span style={styles.logText(log.type)}>
+                                {log.text}
+                            </span>
+                        </div>
+                    ))}
+                    <div ref={terminalEndRef} />
                 </div>
             </div>
         </div>

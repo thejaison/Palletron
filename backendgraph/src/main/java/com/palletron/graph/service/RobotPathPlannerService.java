@@ -43,12 +43,17 @@ public class RobotPathPlannerService {
                 .orElseThrow(() -> new IllegalArgumentException("Plot not found for key: " + keyId));
 
         GraphReo graphReo = graphReoRepository.findById(mapPlot.getId())
-                .orElseThrow(() -> new IllegalArgumentException("Graph representation not found for plot: " + mapPlot.getPlotName()));
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Graph representation not found for plot: " + mapPlot.getPlotName()));
 
         // Parse canvasData to map node ID string -> matrix index
         String canvasDataStr = graphReo.getCanvasData();
-        Map<String, Object> canvasData = objectMapper.readValue(canvasDataStr, new TypeReference<Map<String, Object>>() {});
-        List<Map<String, Object>> nodes = objectMapper.convertValue(canvasData.get("nodes"), new TypeReference<List<Map<String, Object>>>() {});
+        Map<String, Object> canvasData = objectMapper.readValue(canvasDataStr,
+                new TypeReference<Map<String, Object>>() {
+                });
+        List<Map<String, Object>> nodes = objectMapper.convertValue(canvasData.get("nodes"),
+                new TypeReference<List<Map<String, Object>>>() {
+                });
 
         if (nodes == null || nodes.isEmpty()) {
             throw new IllegalArgumentException("No nodes defined in the graph.");
@@ -63,8 +68,10 @@ public class RobotPathPlannerService {
             indexToId.put(i, nodeId);
         }
 
-        // Build the connections and weights matrices dynamically from canvasData.nodes and canvasData.edges
-        // to ensure correctness and compatibility with both unidirectional and bidirectional databases.
+        // Build the connections and weights matrices dynamically from canvasData.nodes
+        // and canvasData.edges
+        // to ensure correctness and compatibility with both unidirectional and
+        // bidirectional databases.
         String[][] connections = new String[N][N];
         double[][] weights = new double[N][N];
         for (int i = 0; i < N; i++) {
@@ -72,7 +79,9 @@ public class RobotPathPlannerService {
             Arrays.fill(weights[i], 0.0);
         }
 
-        List<Map<String, Object>> edges = objectMapper.convertValue(canvasData.get("edges"), new TypeReference<List<Map<String, Object>>>() {});
+        List<Map<String, Object>> edges = objectMapper.convertValue(canvasData.get("edges"),
+                new TypeReference<List<Map<String, Object>>>() {
+                });
         if (edges != null) {
             for (Map<String, Object> edge : edges) {
                 String fromNodeId = (String) edge.get("from");
@@ -122,7 +131,8 @@ public class RobotPathPlannerService {
         List<Robot> order = new ArrayList<>(robots);
         order.sort((a, b) -> {
             int c = Double.compare(a.freeRunTime, b.freeRunTime);
-            if (c != 0) return c;
+            if (c != 0)
+                return c;
             return Integer.compare(a.id, b.id);
         });
 
@@ -163,7 +173,8 @@ public class RobotPathPlannerService {
                         }
                     }
 
-                    if (pushTo < 0) break;
+                    if (pushTo < 0)
+                        break;
 
                     tStart = pushTo;
                     tEnd = tStart + travelTime;
@@ -212,7 +223,10 @@ public class RobotPathPlannerService {
         List<Double> scheduleTimes = new ArrayList<>();
 
         Robot(int id, int src, int dst, double speedCmPerSec) {
-            this.id = id; this.src = src; this.dst = dst; this.speedCmPerSec = speedCmPerSec;
+            this.id = id;
+            this.src = src;
+            this.dst = dst;
+            this.speedCmPerSec = speedCmPerSec;
         }
     }
 
@@ -226,26 +240,30 @@ public class RobotPathPlannerService {
         dist[src] = 0.0;
 
         PriorityQueue<int[]> pq = new PriorityQueue<>(Comparator.comparingDouble(a -> dist[a[0]]));
-        pq.add(new int[]{src});
+        pq.add(new int[] { src });
 
         while (!pq.isEmpty()) {
             int u = pq.poll()[0];
-            if (visited[u]) continue;
+            if (visited[u])
+                continue;
             visited[u] = true;
-            if (u == dst) break;
+            if (u == dst)
+                break;
 
             for (int v = 0; v < N; v++) {
-                if (!allowed(u, v, connections, weights)) continue;
+                if (!allowed(u, v, connections, weights))
+                    continue;
                 double nd = dist[u] + weights[u][v];
                 if (nd < dist[v]) {
                     dist[v] = nd;
                     prev[v] = u;
-                    pq.add(new int[]{v});
+                    pq.add(new int[] { v });
                 }
             }
         }
 
-        if (dist[dst] == Double.MAX_VALUE) return Collections.emptyList();
+        if (dist[dst] == Double.MAX_VALUE)
+            return Collections.emptyList();
 
         LinkedList<Integer> path = new LinkedList<>();
         for (int at = dst; at != -1; at = prev[at]) {
@@ -255,12 +273,17 @@ public class RobotPathPlannerService {
     }
 
     private static boolean allowed(int i, int j, String[][] connections, double[][] weights) {
-        if (i == j) return false;
+        if (i == j)
+            return false;
         String lbl = connections[i][j];
-        if (lbl.equals("X")) return false;
-        if (lbl.equals("IL")) return false;
-        if (lbl.equals("UI")) return false;
-        if (lbl.equals("UL")) return false;
+        if (lbl.equals("X"))
+            return false;
+        if (lbl.equals("IL"))
+            return false;
+        if (lbl.equals("UI"))
+            return false;
+        if (lbl.equals("UL"))
+            return false;
         return weights[i][j] > 0;
     }
 
@@ -277,10 +300,10 @@ public class RobotPathPlannerService {
     }
 
     private static void reserveNode(Map<Integer, List<double[]>> map, int node, double start, double end) {
-        map.computeIfAbsent(node, k -> new ArrayList<>()).add(new double[]{start, end});
+        map.computeIfAbsent(node, k -> new ArrayList<>()).add(new double[] { start, end });
     }
 
     private static void reserveEdge(Map<String, List<double[]>> map, int u, int v, double start, double end) {
-        map.computeIfAbsent(u + "_" + v, k -> new ArrayList<>()).add(new double[]{start, end});
+        map.computeIfAbsent(u + "_" + v, k -> new ArrayList<>()).add(new double[] { start, end });
     }
 }

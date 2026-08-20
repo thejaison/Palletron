@@ -1,0 +1,1 @@
+/opt/homebrew/Cellar/postgresql@16/16.15/bin/postgres "-D" "/Users/karthikvivek/Documents/Palletron/main/.palletron-postgres" "-p" "5433"

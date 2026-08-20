@@ -1,0 +1,22 @@
+2026-08-20 14:40:10.517 IST [19085] LOG:  starting PostgreSQL 16.15 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.1.1.101), 64-bit
+2026-08-20 14:40:10.518 IST [19085] LOG:  listening on IPv6 address "::1", port 5433
+2026-08-20 14:40:10.518 IST [19085] LOG:  listening on IPv4 address "127.0.0.1", port 5433
+2026-08-20 14:40:10.518 IST [19085] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5433"
+2026-08-20 14:40:10.519 IST [19088] LOG:  database system was shut down at 2026-08-20 14:40:10 IST
+2026-08-20 14:40:10.521 IST [19085] LOG:  database system is ready to accept connections
+2026-08-20 14:40:10.678 IST [19095] ERROR:  syntax error at or near "\" at character 106
+2026-08-20 14:40:10.678 IST [19095] STATEMENT:  SELECT 'CREATE DATABASE palletron' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'palletron')\gexec
+2026-08-20 14:40:30.309 IST [19648] FATAL:  database "palletron" does not exist
+2026-08-20 14:44:30.035 IST [22387] FATAL:  lock file "postmaster.pid" already exists
+2026-08-20 14:44:30.035 IST [22387] HINT:  Is another postmaster (PID 19085) running in data directory "/Users/karthikvivek/Documents/Palletron/main/.palletron-postgres"?
+2026-08-20 14:45:10.522 IST [19086] LOG:  checkpoint starting: time
+2026-08-20 14:46:50.851 IST [19086] LOG:  checkpoint complete: wrote 988 buffers (6.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=100.320 s, sync=0.007 s, total=100.329 s; sync files=324, longest=0.001 s, average=0.001 s; distance=4693 kB, estimate=4693 kB; lsn=0/19B3CE8, redo lsn=0/19B3CB0
+2026-08-20 14:49:30.437 IST [21537] ERROR:  duplicate key value violates unique constraint "graph_reo_pkey"
+2026-08-20 14:49:30.437 IST [21537] DETAIL:  Key (plot_id)=(1) already exists.
+2026-08-20 14:49:30.437 IST [21537] STATEMENT:  insert into graph_reo (canvas_data,connections,weights,plot_id) values ($1,$2,$3,$4)
+2026-08-20 14:50:10.855 IST [19086] LOG:  checkpoint starting: time
+2026-08-20 14:50:12.901 IST [19086] LOG:  checkpoint complete: wrote 21 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=2.042 s, sync=0.002 s, total=2.047 s; sync files=12, longest=0.001 s, average=0.001 s; distance=7 kB, estimate=4225 kB; lsn=0/19B5AE0, redo lsn=0/19B5A70
+2026-08-20 14:55:10.907 IST [19086] LOG:  checkpoint starting: time
+2026-08-20 14:55:11.016 IST [19086] LOG:  checkpoint complete: wrote 2 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.103 s, sync=0.001 s, total=0.110 s; sync files=2, longest=0.001 s, average=0.001 s; distance=4 kB, estimate=3803 kB; lsn=0/19B6E50, redo lsn=0/19B6E18
+2026-08-20 15:05:10.022 IST [19086] LOG:  checkpoint starting: time
+2026-08-20 15:05:10.130 IST [19086] LOG:  checkpoint complete: wrote 2 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.102 s, sync=0.001 s, total=0.109 s; sync files=2, longest=0.001 s, average=0.001 s; distance=5 kB, estimate=3423 kB; lsn=0/19B8638, redo lsn=0/19B8600
