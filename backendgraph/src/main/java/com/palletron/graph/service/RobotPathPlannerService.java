@@ -127,14 +127,104 @@ public class RobotPathPlannerService {
             robots.add(r);
         }
 
-        // Sort by priority (freeRunTime ascending, tie-breaker by ID)
-        List<Robot> order = new ArrayList<>(robots);
-        order.sort((a, b) -> {
+        // Detect opposing edge overlaps and establish planning order & constraints
+        Map<Robot, Set<Robot>> adj = new HashMap<>();
+        Map<Robot, Integer> inDegree = new HashMap<>();
+        for (Robot r : robots) {
+            adj.put(r, new HashSet<>());
+            inDegree.put(r, 0);
+        }
+
+        Map<Robot, List<Constraint>> robotConstraints = new HashMap<>();
+        for (Robot r : robots) {
+            robotConstraints.put(r, new ArrayList<>());
+        }
+
+        for (int i = 0; i < robots.size(); i++) {
+            Robot rI = robots.get(i);
+            for (int j = i + 1; j < robots.size(); j++) {
+                Robot rJ = robots.get(j);
+
+                for (int k = 0; k < rI.path.size() - 1; k++) {
+                    int u = rI.path.get(k);
+                    int v = rI.path.get(k + 1);
+
+                    for (int l = 0; l < rJ.path.size() - 1; l++) {
+                        if (rJ.path.get(l) == v && rJ.path.get(l + 1) == u) {
+                            // Opposing edge overlap found! Compare priorities
+                            int priorityI = k + 1;
+                            int priorityJ = l + 1;
+
+                            int comp = Integer.compare(priorityI, priorityJ);
+                            if (comp == 0) {
+                                comp = Integer.compare(rI.id, rJ.id);
+                            }
+
+                            if (comp < 0) {
+                                // rJ has priority. rJ must be planned before rI.
+                                if (adj.get(rJ).add(rI)) {
+                                    inDegree.put(rI, inDegree.get(rI) + 1);
+                                }
+                                Constraint c = new Constraint(k, rJ, l + 1);
+                                robotConstraints.get(rI).add(c);
+                            } else {
+                                // rI has priority. rI must be planned before rJ.
+                                if (adj.get(rI).add(rJ)) {
+                                    inDegree.put(rJ, inDegree.get(rJ) + 1);
+                                }
+                                Constraint c = new Constraint(l, rI, k + 1);
+                                robotConstraints.get(rJ).add(c);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Kahn's algorithm for topological sorting of planning order
+        Queue<Robot> queue = new LinkedList<>();
+        List<Robot> zeroInDegree = new ArrayList<>();
+        for (Robot r : robots) {
+            if (inDegree.get(r) == 0) {
+                zeroInDegree.add(r);
+            }
+        }
+        // Base sorting: freeRunTime ascending, tie-breaker by ID
+        zeroInDegree.sort((a, b) -> {
             int c = Double.compare(a.freeRunTime, b.freeRunTime);
-            if (c != 0)
-                return c;
+            if (c != 0) return c;
             return Integer.compare(a.id, b.id);
         });
+        queue.addAll(zeroInDegree);
+
+        List<Robot> order = new ArrayList<>();
+        while (!queue.isEmpty()) {
+            Robot u = queue.poll();
+            order.add(u);
+
+            List<Robot> neighbors = new ArrayList<>(adj.get(u));
+            neighbors.sort((a, b) -> {
+                int c = Double.compare(a.freeRunTime, b.freeRunTime);
+                if (c != 0) return c;
+                return Integer.compare(a.id, b.id);
+            });
+
+            for (Robot v : neighbors) {
+                inDegree.put(v, inDegree.get(v) - 1);
+                if (inDegree.get(v) == 0) {
+                    queue.add(v);
+                }
+            }
+        }
+
+        // Fallback for cycles
+        if (order.size() < robots.size()) {
+            for (Robot r : robots) {
+                if (!order.contains(r)) {
+                    order.add(r);
+                }
+            }
+        }
 
         double safetyMarginSec = 0.5;
         Map<Integer, List<double[]>> reservedNode = new HashMap<>();
@@ -144,6 +234,29 @@ public class RobotPathPlannerService {
             if (r.path.isEmpty()) {
                 continue;
             }
+
+            // Calculate base t_min timeline (earliest possible arrivals)
+            double[] t_min = new double[r.path.size()];
+            t_min[0] = 0.0;
+            for (int idx = 1; idx < r.path.size(); idx++) {
+                double travelTime = weights[r.path.get(idx - 1)][r.path.get(idx)] / r.speedCmPerSec;
+                t_min[idx] = t_min[idx - 1] + travelTime;
+            }
+
+            // Apply opposing edge wait constraints from higher priority robots
+            for (Constraint c : robotConstraints.getOrDefault(r, Collections.emptyList())) {
+                if (c.partner.scheduleTimes.size() > c.partnerIdx) {
+                    double tPartnerArrival = c.partner.scheduleTimes.get(c.partnerIdx);
+                    t_min[c.k] = Math.max(t_min[c.k], tPartnerArrival + safetyMarginSec);
+                }
+            }
+
+            // Propagate t_min forward to maintain consistent arrival timeline
+            for (int idx = 1; idx < r.path.size(); idx++) {
+                double travelTime = weights[r.path.get(idx - 1)][r.path.get(idx)] / r.speedCmPerSec;
+                t_min[idx] = Math.max(t_min[idx], t_min[idx - 1] + travelTime);
+            }
+
             double t = 0.0;
             int pos = r.path.get(0);
             r.scheduleNodes.add(pos);
@@ -154,7 +267,8 @@ public class RobotPathPlannerService {
                 int next = r.path.get(idx);
                 double travelTime = weights[pos][next] / r.speedCmPerSec;
 
-                double tStart = t;
+                // Adjust tStart to respect t_min constraint
+                double tStart = Math.max(t, t_min[idx] - travelTime);
                 double tEnd = tStart + travelTime;
 
                 while (true) {
@@ -211,6 +325,18 @@ public class RobotPathPlannerService {
         }
 
         return responses;
+    }
+
+    private static class Constraint {
+        int k;
+        Robot partner;
+        int partnerIdx;
+
+        Constraint(int k, Robot partner, int partnerIdx) {
+            this.k = k;
+            this.partner = partner;
+            this.partnerIdx = partnerIdx;
+        }
     }
 
     private static class Robot {
