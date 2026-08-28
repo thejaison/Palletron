@@ -20,3 +20,5 @@
 2026-08-20 14:55:11.016 IST [19086] LOG:  checkpoint complete: wrote 2 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.103 s, sync=0.001 s, total=0.110 s; sync files=2, longest=0.001 s, average=0.001 s; distance=4 kB, estimate=3803 kB; lsn=0/19B6E50, redo lsn=0/19B6E18
 2026-08-20 15:05:10.022 IST [19086] LOG:  checkpoint starting: time
 2026-08-20 15:05:10.130 IST [19086] LOG:  checkpoint complete: wrote 2 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.102 s, sync=0.001 s, total=0.109 s; sync files=2, longest=0.001 s, average=0.001 s; distance=5 kB, estimate=3423 kB; lsn=0/19B8638, redo lsn=0/19B8600
+2026-08-28 10:32:44.794 IST [19086] LOG:  checkpoint starting: time
+2026-08-28 10:32:45.212 IST [19086] LOG:  checkpoint complete: wrote 5 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.409 s, sync=0.001 s, total=0.418 s; sync files=5, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=3081 kB; lsn=0/19B89C0, redo lsn=0/19B8988
