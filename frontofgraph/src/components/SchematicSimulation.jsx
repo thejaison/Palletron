@@ -46,21 +46,28 @@ export default function SchematicSimulation({
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
     const [saveToast, setSaveToast] = useState("");
 
-    // Custom turn angles per intersection node (defaults to 90°)
-    const [nodeAngles, setNodeAngles] = useState(() => {
-        const initial = {};
-        nodes.forEach(n => {
-            if (n.type === "intersection") {
-                initial[n.id] = n.turnAngle || 90;
-            }
-        });
-        return initial;
-    });
+    // Helper: calculate Cartesian compass angle from fromNode to toNode
+    // East = 0°, North = 90°, West = 180°, South = 270° (range 0° to 359°)
+    const calculateCompassAngle = (fromNode, toNode) => {
+        if (!fromNode || !toNode) return 0;
+        const dx = toNode.x - fromNode.x;
+        const dy = fromNode.y - toNode.y; // Invert SVG y: Up is North (positive)
+        const deg = Math.round(Math.atan2(dy, dx) * 180 / Math.PI);
+        return (deg + 360) % 360;
+    };
+
+    // Helper: get angle of connection at intersection node iNode to neighborNode
+    const getConnectionAngle = (iNode, neighborNode) => {
+        if (iNode.connectionAngles && iNode.connectionAngles[neighborNode.id] !== undefined) {
+            return iNode.connectionAngles[neighborNode.id];
+        }
+        return calculateCompassAngle(iNode, neighborNode);
+    };
 
     // Edit Modals
     const [editingEdge, setEditingEdge] = useState(null);
     const [distanceInput, setDistanceInput] = useState("");
-    const [editingNodeAngle, setEditingNodeAngle] = useState(null);
+    const [editingConnectionAngle, setEditingConnectionAngle] = useState(null);
     const [angleInput, setAngleInput] = useState("");
 
     // Terminal states
@@ -74,19 +81,6 @@ export default function SchematicSimulation({
             terminalEndRef.current.scrollIntoView({ behavior: "smooth" });
         }
     }, [activeLogs, isTerminalCollapsed]);
-
-    // Keep nodeAngles in sync when nodes change
-    useEffect(() => {
-        setNodeAngles(prev => {
-            const next = { ...prev };
-            nodes.forEach(n => {
-                if (n.type === "intersection" && next[n.id] === undefined) {
-                    next[n.id] = n.turnAngle || 90;
-                }
-            });
-            return next;
-        });
-    }, [nodes]);
 
     // Coordinate conversion helper: client coordinates -> SVG canvas coordinates
     const getSVGCoords = (e) => {
@@ -214,28 +208,66 @@ export default function SchematicSimulation({
         setTimeout(() => setSaveToast(""), 2500);
     };
 
-    // Save distance edit
+    // Save distance edit (applies to both directions between the two nodes)
     const handleSaveDistance = () => {
         if (!editingEdge) return;
         const val = parseFloat(distanceInput);
         if (!isNaN(val) && val > 0 && setEdges) {
-            setEdges(prev => prev.map(e => e.id === editingEdge.id ? { ...e, distance: val } : e));
+            setEdges(prev => prev.map(e => {
+                const isMatching = (e.from === editingEdge.from && e.to === editingEdge.to) ||
+                                   (e.from === editingEdge.to && e.to === editingEdge.from);
+                return isMatching ? { ...e, distance: val } : e;
+            }));
         }
         setEditingEdge(null);
         setDistanceInput("");
     };
 
-    // Save angle edit
-    const handleSaveAngle = () => {
-        if (!editingNodeAngle) return;
-        const val = parseFloat(angleInput);
+    // Save connection angle edit
+    const handleSaveConnectionAngle = (customVal) => {
+        if (!editingConnectionAngle) return;
+        const { iNode, neighborNode } = editingConnectionAngle;
+        const val = customVal !== undefined ? customVal : parseFloat(angleInput);
+
         if (!isNaN(val) && val >= 0 && val <= 360) {
-            setNodeAngles(prev => ({ ...prev, [editingNodeAngle.id]: val }));
+            const normalizedVal = Math.round(val) % 360;
             if (setNodes) {
-                setNodes(prev => prev.map(n => n.id === editingNodeAngle.id ? { ...n, turnAngle: val } : n));
+                setNodes(prev => prev.map(n => {
+                    if (n.id === iNode.id) {
+                        return {
+                            ...n,
+                            connectionAngles: {
+                                ...(n.connectionAngles || {}),
+                                [neighborNode.id]: normalizedVal
+                            }
+                        };
+                    }
+                    return n;
+                }));
             }
         }
-        setEditingNodeAngle(null);
+        setEditingConnectionAngle(null);
+        setAngleInput("");
+    };
+
+    // Reset connection angle to automatic grid calculation
+    const handleResetConnectionAngleToAuto = () => {
+        if (!editingConnectionAngle) return;
+        const { iNode, neighborNode } = editingConnectionAngle;
+        if (setNodes) {
+            setNodes(prev => prev.map(n => {
+                if (n.id === iNode.id) {
+                    const nextAngles = { ...(n.connectionAngles || {}) };
+                    delete nextAngles[neighborNode.id];
+                    return {
+                        ...n,
+                        connectionAngles: nextAngles
+                    };
+                }
+                return n;
+            }));
+        }
+        setEditingConnectionAngle(null);
         setAngleInput("");
     };
 
@@ -570,121 +602,158 @@ export default function SchematicSimulation({
                         {/* Pan & Zoom Transform Group */}
                         <g transform={`translate(${pan.x}, ${pan.y}) scale(${zoom})`}>
                             {/* ================================================================= */}
-                            {/* 1. PATH EDGES (Clean dotted lines with clickable distance badge) */}
+                            {/* 1. PATH EDGES (Deduplicated clean dotted lines with distance badge) */}
                             {/* ================================================================= */}
-                            {edges.map(edge => {
-                                const fromNode = nodes.find(n => n.id === edge.from);
-                                const toNode = nodes.find(n => n.id === edge.to);
-                                if (!fromNode || !toNode) return null;
+                            {(() => {
+                                const renderedPairs = new Set();
+                                return edges.map(edge => {
+                                    const fromNode = nodes.find(n => n.id === edge.from);
+                                    const toNode = nodes.find(n => n.id === edge.to);
+                                    if (!fromNode || !toNode) return null;
 
-                                const midX = (fromNode.x + toNode.x) / 2;
-                                const midY = (fromNode.y + toNode.y) / 2;
-                                const dist = edge.distance !== undefined ? edge.distance : 1000;
+                                    const pairKey = edge.from < edge.to ? `${edge.from}_${edge.to}` : `${edge.to}_${edge.from}`;
+                                    if (renderedPairs.has(pairKey)) return null;
+                                    renderedPairs.add(pairKey);
 
-                                return (
-                                    <g key={edge.id}>
-                                        {/* Clean path line connecting nodes */}
-                                        <line
-                                            x1={fromNode.x}
-                                            y1={fromNode.y}
-                                            x2={toNode.x}
-                                            y2={toNode.y}
-                                            stroke="#1F2937"
-                                            strokeWidth="2.5"
-                                            strokeDasharray="5 5"
-                                            strokeLinecap="round"
-                                        />
+                                    const midX = (fromNode.x + toNode.x) / 2;
+                                    const midY = (fromNode.y + toNode.y) / 2;
+                                    const dist = edge.distance !== undefined ? edge.distance : 1000;
 
-                                        {/* Minimal Clickable Distance Badge */}
+                                    return (
+                                        <g key={pairKey}>
+                                            {/* Clean path line connecting nodes (Single dotted line) */}
+                                            <line
+                                                x1={fromNode.x}
+                                                y1={fromNode.y}
+                                                x2={toNode.x}
+                                                y2={toNode.y}
+                                                stroke="#1F2937"
+                                                strokeWidth="2.5"
+                                                strokeDasharray="5 5"
+                                                strokeLinecap="round"
+                                            />
+
+                                            {/* Minimal Clickable Distance Badge */}
+                                            <g
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setEditingEdge(edge);
+                                                    setDistanceInput(dist.toString());
+                                                }}
+                                                style={{ cursor: "pointer" }}
+                                            >
+                                                <title>Click to edit distance: {dist}cm</title>
+                                                <rect
+                                                    x={midX - 28}
+                                                    y={midY - 10}
+                                                    width="56"
+                                                    height="20"
+                                                    rx="5"
+                                                    fill="#FFFFFF"
+                                                    stroke="#E5E7EB"
+                                                    strokeWidth="1"
+                                                    filter="url(#badge-shadow)"
+                                                />
+                                                <text
+                                                    x={midX}
+                                                    y={midY + 4}
+                                                    textAnchor="middle"
+                                                    fontSize="10px"
+                                                    fontWeight="700"
+                                                    fill="#374151"
+                                                    fontFamily="'Outfit', sans-serif"
+                                                >
+                                                    {dist}cm
+                                                </text>
+                                            </g>
+                                        </g>
+                                    );
+                                });
+                            })()}
+
+                            {/* ================================================================= */}
+                            {/* 2. INTERSECTION CONNECTION ANGLE BADGES                           */}
+                            {/* Badges for every edge connection at every intersection node       */}
+                            {/* ================================================================= */}
+                            {nodes.filter(n => n.type === "intersection").flatMap(iNode => {
+                                // Collect unique neighbors connected to iNode
+                                const neighborsMap = new Map();
+                                edges.forEach(e => {
+                                    let neighborId = null;
+                                    if (e.from === iNode.id) neighborId = e.to;
+                                    else if (e.to === iNode.id) neighborId = e.from;
+                                    if (neighborId && !neighborsMap.has(neighborId)) {
+                                        const neighborNode = nodes.find(n => n.id === neighborId);
+                                        if (neighborNode) {
+                                            neighborsMap.set(neighborId, neighborNode);
+                                        }
+                                    }
+                                });
+
+                                return Array.from(neighborsMap.entries()).map(([neighborId, neighborNode]) => {
+                                    const angle = getConnectionAngle(iNode, neighborNode);
+                                    const isCustom = iNode.connectionAngles && iNode.connectionAngles[neighborId] !== undefined;
+
+                                    // Position badge along the connection branch
+                                    const dx = neighborNode.x - iNode.x;
+                                    const dy = neighborNode.y - iNode.y;
+                                    const dist = Math.hypot(dx, dy) || 1;
+                                    const ux = dx / dist;
+                                    const uy = dy / dist;
+
+                                    // Perpendicular offset so badge is neatly placed beside edge
+                                    const px = -uy;
+                                    const py = ux;
+                                    const badgeDist = Math.min(dist * 0.36, 48);
+                                    const bx = iNode.x + ux * badgeDist + px * 14;
+                                    const by = iNode.y + uy * badgeDist + py * 14;
+
+                                    return (
                                         <g
+                                            key={`angle-${iNode.id}-${neighborId}`}
                                             onClick={(e) => {
                                                 e.stopPropagation();
-                                                setEditingEdge(edge);
-                                                setDistanceInput(dist.toString());
+                                                const autoAngle = calculateCompassAngle(iNode, neighborNode);
+                                                setEditingConnectionAngle({
+                                                    iNode,
+                                                    neighborNode,
+                                                    currentAngle: angle,
+                                                    autoAngle
+                                                });
+                                                setAngleInput(angle.toString());
                                             }}
                                             style={{ cursor: "pointer" }}
                                         >
-                                            <title>Click to edit distance: {dist}cm</title>
+                                            <title>
+                                                {`${iNode.label || iNode.id} ➔ ${neighborNode.label || neighborNode.id}: ${angle}° (${isCustom ? "Custom" : "Grid"}). Click to edit.`}
+                                            </title>
+
+                                            {/* Angle Pill */}
                                             <rect
-                                                x={midX - 28}
-                                                y={midY - 10}
-                                                width="56"
+                                                x={bx - 16}
+                                                y={by - 10}
+                                                width="32"
                                                 height="20"
                                                 rx="5"
                                                 fill="#FFFFFF"
-                                                stroke="#E5E7EB"
-                                                strokeWidth="1"
+                                                stroke={isCustom ? "#D97706" : "#F59E0B"}
+                                                strokeWidth={isCustom ? "1.8" : "1.2"}
                                                 filter="url(#badge-shadow)"
                                             />
                                             <text
-                                                x={midX}
-                                                y={midY + 4}
+                                                x={bx}
+                                                y={by + 4}
                                                 textAnchor="middle"
-                                                fontSize="10px"
-                                                fontWeight="700"
-                                                fill="#374151"
+                                                fontSize="9.5px"
+                                                fontWeight="800"
+                                                fill={isCustom ? "#B45309" : "#D97706"}
                                                 fontFamily="'Outfit', sans-serif"
                                             >
-                                                {dist}cm
+                                                {angle}°
                                             </text>
                                         </g>
-                                    </g>
-                                );
-                            })}
-
-                            {/* ================================================================= */}
-                            {/* 2. INTERSECTION ANGLE BADGES (Minimal, clean turn angle pill)    */}
-                            {/* ================================================================= */}
-                            {nodes.filter(n => n.type === "intersection").map(iNode => {
-                                const angle = nodeAngles[iNode.id] || 90;
-                                // Place angle badge neatly adjacent to the intersection
-                                const bx = iNode.x + 32;
-                                const by = iNode.y - 24;
-
-                                return (
-                                    <g
-                                        key={`angle-badge-${iNode.id}`}
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            setEditingNodeAngle(iNode);
-                                            setAngleInput(angle.toString());
-                                        }}
-                                        style={{ cursor: "pointer" }}
-                                    >
-                                        <title>Click to change turn angle for {iNode.label || iNode.id} (Current: {angle}°)</title>
-                                        {/* Subtle corner arc indicator */}
-                                        <path
-                                            d={`M ${iNode.x + 20},${iNode.y - 6} A 20 20 0 0 0 ${iNode.x + 6},${iNode.y - 20}`}
-                                            fill="none"
-                                            stroke="#F59E0B"
-                                            strokeWidth="1.5"
-                                            strokeLinecap="round"
-                                        />
-                                        {/* Angle Pill */}
-                                        <rect
-                                            x={bx - 14}
-                                            y={by - 9}
-                                            width="28"
-                                            height="18"
-                                            rx="4"
-                                            fill="#FFFFFF"
-                                            stroke="#F59E0B"
-                                            strokeWidth="1.2"
-                                            filter="url(#badge-shadow)"
-                                        />
-                                        <text
-                                            x={bx}
-                                            y={by + 4}
-                                            textAnchor="middle"
-                                            fontSize="10px"
-                                            fontWeight="800"
-                                            fill="#D97706"
-                                            fontFamily="'Outfit', sans-serif"
-                                        >
-                                            {angle}°
-                                        </text>
-                                    </g>
-                                );
+                                    );
+                                });
                             })}
 
                             {/* ================================================================= */}
@@ -747,20 +816,21 @@ export default function SchematicSimulation({
                             })}
 
                             {/* ================================================================= */}
-                            {/* 4. ROBOT DOTS (Minimal AGV Dots moving through path smoothly)    */}
+                            {/* 4. ROBOT DOTS (AGV Dots moving smoothly through path)             */}
                             {/* ================================================================= */}
                             {/* Active Simulating Dots */}
                             {isSimulating && vehicles.map((veh, idx) => {
                                 const color = veh.color || getRobotColor(idx);
                                 const heading = veh.heading !== undefined ? veh.heading : 0;
-                                const headingRad = (heading * Math.PI) / 180;
+                                const compassRad = (heading * Math.PI) / 180;
                                 const turningAngle = veh.turningAngle || 0;
 
+                                // Invert SVG y: Up is North (positive)
+                                const pointerX = veh.x + Math.cos(compassRad) * 11;
+                                const pointerY = veh.y - Math.sin(compassRad) * 11;
+
                                 return (
-                                    <g
-                                        key={veh.id || idx}
-                                        style={{ transition: "all 0.05s linear" }}
-                                    >
+                                    <g key={veh.id || idx}>
                                         {/* Soft outer glow aura */}
                                         <circle
                                             cx={veh.x}
@@ -783,8 +853,8 @@ export default function SchematicSimulation({
 
                                         {/* Direction Pointer Dot */}
                                         <circle
-                                            cx={veh.x + Math.cos(headingRad) * 11}
-                                            cy={veh.y + Math.sin(headingRad) * 11}
+                                            cx={pointerX}
+                                            cy={pointerY}
                                             r="2.5"
                                             fill="#111827"
                                         />
@@ -1226,9 +1296,9 @@ export default function SchematicSimulation({
             )}
 
             {/* ================================================================= */}
-            {/* MINIMAL MODAL: EDIT ANGLE                                        */}
+            {/* MINIMAL MODAL: EDIT INTERSECTION CONNECTION ANGLE                */}
             {/* ================================================================= */}
-            {editingNodeAngle && (
+            {editingConnectionAngle && (
                 <div style={{
                     position: "fixed",
                     inset: 0,
@@ -1241,19 +1311,24 @@ export default function SchematicSimulation({
                     <div style={{
                         background: "#FFFFFF",
                         borderRadius: "10px",
-                        padding: "16px 20px",
-                        width: "300px",
-                        boxShadow: "0 8px 20px rgba(0,0,0,0.12)",
+                        padding: "18px 22px",
+                        width: "320px",
+                        boxShadow: "0 10px 25px rgba(0,0,0,0.15)",
                         display: "flex",
                         flexDirection: "column",
                         gap: "12px"
                     }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                            <h3 style={{ margin: 0, fontSize: "14px", fontWeight: 700, color: "#111827" }}>
-                                Edit Turn Angle ({editingNodeAngle.label || editingNodeAngle.id})
-                            </h3>
+                            <div>
+                                <h3 style={{ margin: 0, fontSize: "14px", fontWeight: 700, color: "#111827" }}>
+                                    Connection Angle
+                                </h3>
+                                <span style={{ fontSize: "11px", color: "#6B7280", fontWeight: 500 }}>
+                                    {editingConnectionAngle.iNode.label || editingConnectionAngle.iNode.id} ➔ {editingConnectionAngle.neighborNode.label || editingConnectionAngle.neighborNode.id}
+                                </span>
+                            </div>
                             <button
-                                onClick={() => setEditingNodeAngle(null)}
+                                onClick={() => setEditingConnectionAngle(null)}
                                 style={{ background: "transparent", border: "none", cursor: "pointer", color: "#9CA3AF" }}
                             >
                                 <X size={15} />
@@ -1261,53 +1336,89 @@ export default function SchematicSimulation({
                         </div>
 
                         <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                            <label style={{ fontSize: "11px", color: "#6B7280" }}>Turn Angle (0° - 360°)</label>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                <label style={{ fontSize: "11px", color: "#4B5563", fontWeight: 600 }}>Angle (0° - 359°)</label>
+                                <span style={{ fontSize: "10px", color: "#9CA3AF" }}>E:0° | N:90° | W:180° | S:270°</span>
+                            </div>
                             <input
                                 type="number"
                                 min="0"
-                                max="360"
+                                max="359"
                                 value={angleInput}
                                 onChange={(e) => setAngleInput(e.target.value)}
                                 autoFocus
                                 style={{
-                                    padding: "7px 10px",
+                                    padding: "8px 10px",
                                     borderRadius: "6px",
                                     border: "1px solid #D1D5DB",
-                                    fontSize: "13px",
-                                    fontWeight: 600,
+                                    fontSize: "14px",
+                                    fontWeight: 700,
+                                    color: "#111827",
                                     outline: "none"
                                 }}
                             />
                         </div>
 
-                        {/* Quick Presets */}
-                        <div style={{ display: "flex", gap: "4px" }}>
-                            {[45, 90, 135, 180].map(val => (
-                                <button
-                                    key={val}
-                                    onClick={() => setAngleInput(val.toString())}
-                                    style={{
-                                        flex: 1,
-                                        padding: "3px",
-                                        borderRadius: "5px",
-                                        border: "1px solid #E5E7EB",
-                                        background: "#F9FAFB",
-                                        fontSize: "10px",
-                                        fontWeight: 600,
-                                        cursor: "pointer"
-                                    }}
-                                >
-                                    {val}°
-                                </button>
-                            ))}
+                        {/* Compass Quick Presets */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                            <span style={{ fontSize: "10px", fontWeight: 600, color: "#6B7280" }}>Compass Presets:</span>
+                            <div style={{ display: "flex", gap: "3px" }}>
+                                {[
+                                    { label: "0° (E)", val: 0 },
+                                    { label: "90° (N)", val: 90 },
+                                    { label: "120°", val: 120 },
+                                    { label: "180° (W)", val: 180 },
+                                    { label: "270° (S)", val: 270 }
+                                ].map(p => (
+                                    <button
+                                        key={p.val}
+                                        onClick={() => setAngleInput(p.val.toString())}
+                                        style={{
+                                            flex: 1,
+                                            padding: "4px 1px",
+                                            borderRadius: "5px",
+                                            border: "1px solid #E5E7EB",
+                                            background: angleInput === p.val.toString() ? "#FEF3C7" : "#F9FAFB",
+                                            color: angleInput === p.val.toString() ? "#B45309" : "#374151",
+                                            fontSize: "9px",
+                                            fontWeight: 700,
+                                            cursor: "pointer"
+                                        }}
+                                    >
+                                        {p.label}
+                                    </button>
+                                ))}
+                            </div>
                         </div>
+
+                        {/* Reset to Grid Auto */}
+                        <button
+                            onClick={handleResetConnectionAngleToAuto}
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                gap: "5px",
+                                padding: "5px",
+                                borderRadius: "5px",
+                                border: "1px dashed #D1D5DB",
+                                background: "#F9FAFB",
+                                fontSize: "11px",
+                                color: "#4B5563",
+                                fontWeight: 600,
+                                cursor: "pointer"
+                            }}
+                        >
+                            <RotateCcw size={11} />
+                            Reset to Auto Grid ({editingConnectionAngle.autoAngle}°)
+                        </button>
 
                         <div style={{ display: "flex", gap: "6px", marginTop: "4px" }}>
                             <button
-                                onClick={() => setEditingNodeAngle(null)}
+                                onClick={() => setEditingConnectionAngle(null)}
                                 style={{
                                     flex: 1,
-                                    padding: "6px",
+                                    padding: "7px",
                                     borderRadius: "6px",
                                     border: "1px solid #E5E7EB",
                                     background: "#FFFFFF",
@@ -1320,20 +1431,21 @@ export default function SchematicSimulation({
                                 Cancel
                             </button>
                             <button
-                                onClick={handleSaveAngle}
+                                onClick={() => handleSaveConnectionAngle()}
                                 style={{
                                     flex: 1,
-                                    padding: "6px",
+                                    padding: "7px",
                                     borderRadius: "6px",
                                     border: "none",
                                     background: "#F59E0B",
                                     fontSize: "12px",
                                     fontWeight: 700,
                                     cursor: "pointer",
-                                    color: "#FFFFFF"
+                                    color: "#FFFFFF",
+                                    boxShadow: "0 1px 2px rgba(0,0,0,0.08)"
                                 }}
                             >
-                                Apply
+                                Set Angle
                             </button>
                         </div>
                     </div>

@@ -99,13 +99,16 @@ public class RobotPathPlannerService {
                     Number distNum = (Number) edge.get("distance");
                     double distance = distNum != null ? distNum.doubleValue() : 10.0;
 
-                    // Populate from -> to direction
+                    // Populate from -> to direction and to -> from direction (bidirectional)
                     connections[fromIdx][toIdx] = tFrom + tTo;
-                    weights[fromIdx][toIdx] = distance;
-
-                    // Populate to -> from direction (bidirectional graph representation)
                     connections[toIdx][fromIdx] = tTo + tFrom;
-                    weights[toIdx][fromIdx] = distance;
+
+                    if (weights[fromIdx][toIdx] > 0.0 && distance == 1000.0 && weights[fromIdx][toIdx] != 1000.0) {
+                        // Preserve previously assigned custom distance
+                    } else {
+                        weights[fromIdx][toIdx] = distance;
+                        weights[toIdx][fromIdx] = distance;
+                    }
                 }
             }
         }

@@ -54,6 +54,23 @@ const generateMatrices = (nodesList, edgesList) => {
     return { connections, weights };
 };
 
+// Deduplicate undirected edges to ensure consistency and prevent rendering overlaps
+const deduplicateEdges = (edgeList) => {
+    const seen = new Map();
+    (edgeList || []).forEach(edge => {
+        const key = edge.from < edge.to ? `${edge.from}_${edge.to}` : `${edge.to}_${edge.from}`;
+        if (!seen.has(key)) {
+            seen.set(key, edge);
+        } else {
+            const existing = seen.get(key);
+            if (edge.distance && edge.distance !== 1000) {
+                seen.set(key, { ...existing, distance: edge.distance });
+            }
+        }
+    });
+    return Array.from(seen.values());
+};
+
 // Generates initial grid nodes and paths dynamically based on fleet configurations
 const generateInitialGraph = (numL, numU, enableIntersection) => {
     const newNodes = [];
@@ -115,13 +132,6 @@ const generateInitialGraph = (numL, numU, enableIntersection) => {
                 id: `e-i-cross-${i}`,
                 from: `i-${i}`,
                 to: `i-${i + 1}`,
-                speedMultiplier: 1.0,
-                distance: 1000
-            });
-            newEdges.push({
-                id: `e-i-cross-rev-${i}`,
-                from: `i-${i + 1}`,
-                to: `i-${i}`,
                 speedMultiplier: 1.0,
                 distance: 1000
             });
@@ -240,7 +250,7 @@ export default function WarehouseEditor() {
             if (data.canvasData) {
                 const parsed = JSON.parse(data.canvasData);
                 setNodes(parsed.nodes || []);
-                setEdges(parsed.edges || []);
+                setEdges(deduplicateEdges(parsed.edges || []));
                 setVehicleCount(parsed.vehicleCount || data.noOfRobots || 3);
                 setRobotRoutes(parsed.robots || []);
             } else {

@@ -53,6 +53,44 @@ const generateMatrices = (nodesList, edgesList) => {
     return { connections, weights };
 };
 
+// Deduplicate undirected edges to ensure consistency and prevent rendering overlaps
+const deduplicateEdges = (edgeList) => {
+    const seen = new Map();
+    (edgeList || []).forEach(edge => {
+        const key = edge.from < edge.to ? `${edge.from}_${edge.to}` : `${edge.to}_${edge.from}`;
+        if (!seen.has(key)) {
+            seen.set(key, edge);
+        } else {
+            const existing = seen.get(key);
+            if (edge.distance && edge.distance !== 1000) {
+                seen.set(key, { ...existing, distance: edge.distance });
+            }
+        }
+    });
+    return Array.from(seen.values());
+};
+
+// Compass heading helper: East=0°, North=90°, West=180°, South=270°
+const getCompassAngle = (uNode, vNode) => {
+    if (!uNode || !vNode) return 0;
+    const cdx = vNode.x - uNode.x;
+    const cdy = uNode.y - vNode.y; // Invert SVG y: Up is North (positive)
+    const deg = Math.round(Math.atan2(cdy, cdx) * 180 / Math.PI);
+    return (deg + 360) % 360;
+};
+
+// Determines edge connection angle taking custom intersection connectionAngles into account
+const getSegmentHeading = (fromNode, toNode) => {
+    if (!fromNode || !toNode) return 0;
+    if (fromNode.type === "intersection" && fromNode.connectionAngles?.[toNode.id] !== undefined) {
+        return fromNode.connectionAngles[toNode.id];
+    }
+    if (toNode.type === "intersection" && toNode.connectionAngles?.[fromNode.id] !== undefined) {
+        return (toNode.connectionAngles[fromNode.id] + 180) % 360;
+    }
+    return getCompassAngle(fromNode, toNode);
+};
+
 // Helper for BFS Pathfinding
 const findPath = (start, end, nodes, edges) => {
     const queue = [[start]];
@@ -298,13 +336,26 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
     const [panStart, setPanStart] = useState({ x: 0, y: 0 });
     const [mouseDownPos, setMouseDownPos] = useState({ x: 0, y: 0 });
 
-    // Simulation States
-    const [isSimulating, setIsSimulating] = useState(false);
+    // Simulation States - decoupled so dark and schematic simulations run independently
+    const [activeSimMode, setActiveSimMode] = useState(null); // "schematic" | "dark" | null
+    const isSimulatingSchematic = activeSimMode === "schematic";
+    const isSimulatingDark = activeSimMode === "dark";
+    const isSimulating = activeSimMode !== null;
+
     const [vehicles, setVehicles] = useState([]);
     const [vehicleCount, setVehicleCount] = useState(3);
     const [robotRoutes, setRobotRoutes] = useState([]);
     const animationFrameRef = useRef(null);
     const maxSimTimeRef = useRef(0);
+
+    // Tab switcher that ensures simulations from different tabs do not bleed into each other
+    const handleSwitchTab = (tab) => {
+        if (activeSimMode && activeSimMode !== tab) {
+            setActiveSimMode(null);
+            setVehicles([]);
+        }
+        setActiveTab(tab);
+    };
 
     // Terminal States
     const [isTerminalOpen, setIsTerminalOpen] = useState(true);
@@ -347,7 +398,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
             if (data.canvasData) {
                 const parsed = JSON.parse(data.canvasData);
                 setNodes(parsed.nodes || []);
-                setEdges(parsed.edges || []);
+                setEdges(deduplicateEdges(parsed.edges || []));
                 const count = parsed.vehicleCount || data.noOfRobots || 3;
                 setVehicleCount(count);
 
@@ -383,13 +434,16 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
     };
 
 
-    // Toggle simulation
-    const toggleSimulation = async () => {
-        if (isSimulating) {
-            setIsSimulating(false);
+    // Toggle simulation independently per mode ("schematic" (white) or "dark" (black))
+    const toggleSimulation = async (targetMode = activeTab) => {
+        if (activeSimMode === targetMode) {
+            setActiveSimMode(null);
             setVehicles([]);
             setActiveLogs(terminalLogsRef.current.filter(log => log.time < 0));
         } else {
+            // Stop any running simulation on the other canvas first
+            setActiveSimMode(null);
+            setVehicles([]);
             const loadingNodes = nodes.filter(n => n.type === "loading");
             const unloadingNodes = nodes.filter(n => n.type === "unloading");
 
@@ -480,7 +534,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                 setActiveLogs(generated.filter(log => log.time < 0));
 
                 setVehicles(newVehicles);
-                setIsSimulating(true);
+                setActiveSimMode(targetMode);
             } catch (err) {
                 alert(`Error during simulation setup: ${err.message}`);
             }
@@ -489,7 +543,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
 
     // Simulation animation loop
     useEffect(() => {
-        if (!isSimulating || vehicles.length === 0) return;
+        if (!activeSimMode || vehicles.length === 0) return;
 
         const startTime = performance.now();
         const maxSimTime = maxSimTimeRef.current;
@@ -503,7 +557,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
             setActiveLogs(terminalLogsRef.current.filter(log => log.time <= t));
 
             if (t >= maxSimTime) {
-                setIsSimulating(false);
+                setActiveSimMode(null);
                 setVehicles(prevVehicles => prevVehicles.map(veh => {
                     if (!veh.scheduleNodes || veh.scheduleNodes.length === 0) return veh;
                     const lastNodeId = veh.scheduleNodes[veh.scheduleNodes.length - 1];
@@ -559,7 +613,15 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     const travelTime = distance / speedCmPerSec;
                     const tArrivalFrom = scheduleTimes[k];
                     const tArrivalTo = scheduleTimes[k + 1];
-                    const tDepart = tArrivalTo - travelTime;
+                    let tDepart = tArrivalTo - travelTime;
+
+                    // Bulletproof clamp against skipping or jumping:
+                    // If tDepart is earlier than tArrivalFrom (e.g. backend/frontend distance discrepancy),
+                    // clamp tDepart to tArrivalFrom so the robot moves continuously between arrival and next arrival
+                    if (tDepart < tArrivalFrom) {
+                        tDepart = tArrivalFrom;
+                    }
+                    const effectiveTravelTime = Math.max(0.001, tArrivalTo - tDepart);
 
                     let x = fromNode.x;
                     let y = fromNode.y;
@@ -568,39 +630,36 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     let turnStatus = "Straight (0°)";
                     let status = "MOVING";
 
-                    const dx = toNode.x - fromNode.x;
-                    const dy = toNode.y - fromNode.y;
-                    let segHeading = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+                    const segHeading = getSegmentHeading(fromNode, toNode);
 
                     let prevHeading = segHeading;
                     if (k > 0) {
                         const prevNode = nodes.find(n => n.id === scheduleNodes[k - 1]);
                         if (prevNode) {
-                            const pdx = fromNode.x - prevNode.x;
-                            const pdy = fromNode.y - prevNode.y;
-                            prevHeading = (Math.atan2(pdy, pdx) * 180 / Math.PI + 360) % 360;
+                            prevHeading = getSegmentHeading(prevNode, fromNode);
                         }
                     }
 
+                    // Shortest angular turn difference in [-180, 180]
                     const angleDiff = ((segHeading - prevHeading + 540) % 360) - 180;
 
                     if (t >= tDepart) {
-                        // Robot is moving on the segment
-                        const progress = (t - tDepart) / travelTime;
+                        // Robot is moving smoothly on the segment
+                        const progress = Math.max(0, Math.min(1, (t - tDepart) / effectiveTravelTime));
                         x = fromNode.x + (toNode.x - fromNode.x) * progress;
                         y = fromNode.y + (toNode.y - fromNode.y) * progress;
 
-                        if (Math.abs(angleDiff) > 10 && progress < 0.3) {
-                            const turnEase = progress / 0.3;
-                            heading = prevHeading + angleDiff * turnEase;
+                        if (Math.abs(angleDiff) > 5 && progress < 0.35) {
+                            const turnEase = progress / 0.35;
+                            heading = Math.round((prevHeading + angleDiff * turnEase + 360) % 360);
                             turningAngle = Math.abs(Math.round(angleDiff));
-                            const dir = angleDiff > 0 ? "Right (Clockwise)" : "Left (Counter-Clockwise)";
+                            const dir = angleDiff > 0 ? "Counter-Clockwise (Left)" : "Clockwise (Right)";
                             turnStatus = `Turning ${turningAngle}° ${dir}`;
                             status = "TURNING AT INTERSECTION";
                         } else {
                             heading = segHeading;
                             turningAngle = Math.abs(Math.round(angleDiff));
-                            turnStatus = Math.abs(angleDiff) > 10 ? `Turn: ${turningAngle}° Completed` : "Straight (0°)";
+                            turnStatus = Math.abs(angleDiff) > 5 ? `Turn: ${turningAngle}° Completed` : "Straight (0°)";
                             status = "MOVING";
                         }
                     } else {
@@ -1009,16 +1068,16 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         setNodes={setNodes}
                         edges={edges}
                         setEdges={setEdges}
-                        vehicles={vehicles}
-                        isSimulating={isSimulating}
-                        toggleSimulation={toggleSimulation}
+                        vehicles={isSimulatingSchematic ? vehicles : []}
+                        isSimulating={isSimulatingSchematic}
+                        toggleSimulation={() => toggleSimulation("schematic")}
                         robotRoutes={robotRoutes}
                         handleRouteChange={handleRouteChange}
                         vehicleCount={vehicleCount}
                         plotKey={plotKey}
                         activeLogs={activeLogs}
                         setActiveLogs={setActiveLogs}
-                        onSwitchTab={setActiveTab}
+                        onSwitchTab={handleSwitchTab}
                         saveRobotRoutesToDb={saveRobotRoutesToDb}
                     />
                 </div>
@@ -1065,7 +1124,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         gap: "4px"
                     }}>
                         <button
-                            onClick={() => setActiveTab("schematic")}
+                            onClick={() => handleSwitchTab("schematic")}
                             style={{
                                 display: "flex",
                                 alignItems: "center",
@@ -1086,7 +1145,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             Schematic Grid (White)
                         </button>
                         <button
-                            onClick={() => setActiveTab("dark")}
+                            onClick={() => handleSwitchTab("dark")}
                             style={{
                                 display: "flex",
                                 alignItems: "center",
@@ -1103,23 +1162,23 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             }}
                         >
                             <Layers size={13} />
-                            Dark Canvas
+                            Dark Canvas (Black)
                         </button>
                     </div>
 
                     {/* Toolbar */}
                     <div style={styles.toolbar}>
                         <button
-                            onClick={toggleSimulation}
+                            onClick={() => toggleSimulation("dark")}
                             style={{
                                 ...styles.activeToolButton,
-                                background: isSimulating ? "rgba(239, 68, 68, 0.1)" : "rgba(16, 185, 129, 0.1)",
-                                border: isSimulating ? "1px solid rgba(239, 68, 68, 0.3)" : "1px solid rgba(16, 185, 129, 0.3)",
-                                color: isSimulating ? "#EF4444" : "#10B981"
+                                background: isSimulatingDark ? "rgba(239, 68, 68, 0.1)" : "rgba(16, 185, 129, 0.1)",
+                                border: isSimulatingDark ? "1px solid rgba(239, 68, 68, 0.3)" : "1px solid rgba(16, 185, 129, 0.3)",
+                                color: isSimulatingDark ? "#EF4444" : "#10B981"
                             }}
                         >
-                            {isSimulating ? <Square size={14} fill="#EF4444" /> : <Play size={14} fill="#10B981" />}
-                            {isSimulating ? "Stop Simulation" : "Start Simulation"}
+                            {isSimulatingDark ? <Square size={14} fill="#EF4444" /> : <Play size={14} fill="#10B981" />}
+                            {isSimulatingDark ? "Stop Simulation" : "Start Simulation"}
                         </button>
 
                         <div style={styles.toolDivider} />
@@ -1301,8 +1360,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 );
                             })}
 
-                            {/* Animated Vehicles (AGVs) */}
-                            {isSimulating && vehicles.map(vehicle => (
+                            {/* Animated Vehicles (AGVs) - Only rendered on Dark Canvas when dark simulation is running */}
+                            {isSimulatingDark && vehicles.map(vehicle => (
                                 <g key={vehicle.id}>
                                     <circle
                                         cx={vehicle.x}
