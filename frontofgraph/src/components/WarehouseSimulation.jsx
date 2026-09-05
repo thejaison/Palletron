@@ -10,8 +10,10 @@ import {
     Edit,
     Save,
     Terminal,
-    Trash2
+    Trash2,
+    Sparkles
 } from "lucide-react";
+import SchematicSimulation from "./SchematicSimulation";
 
 
 // Generates connection and weight matrices for database representation
@@ -272,9 +274,12 @@ const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
 };
 
 
-export default function WarehouseSimulation() {
+export default function WarehouseSimulation({ defaultTab = "schematic" }) {
     const navigate = useNavigate();
     const svgRef = useRef(null);
+
+    // Tab state: "schematic" | "dark"
+    const [activeTab, setActiveTab] = useState(defaultTab);
 
     // Key and Session States
     const [plotKey, setPlotKey] = useState(localStorage.getItem("palletron_plot_key") || "");
@@ -408,6 +413,27 @@ export default function WarehouseSimulation() {
             }
 
             try {
+                // Auto-save the latest graph coordinates and distances to database before planning
+                try {
+                    const { connections, weights } = generateMatrices(nodes, edges);
+                    await fetch(`http://localhost:8080/api/plots/${encodeURIComponent(plotKey)}/graph`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            connections: JSON.stringify(connections),
+                            weights: JSON.stringify(weights),
+                            canvasData: JSON.stringify({
+                                nodes,
+                                edges,
+                                vehicleCount,
+                                robots: robotRoutes
+                            })
+                        })
+                    });
+                } catch (saveErr) {
+                    console.warn("Pre-simulation auto-save notice:", saveErr);
+                }
+
                 const response = await fetch(`http://localhost:8080/api/plots/${encodeURIComponent(plotKey)}/plan`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -537,22 +563,66 @@ export default function WarehouseSimulation() {
 
                     let x = fromNode.x;
                     let y = fromNode.y;
+                    let heading = 0;
+                    let turningAngle = 0;
+                    let turnStatus = "Straight (0°)";
+                    let status = "MOVING";
+
+                    const dx = toNode.x - fromNode.x;
+                    const dy = toNode.y - fromNode.y;
+                    let segHeading = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+
+                    let prevHeading = segHeading;
+                    if (k > 0) {
+                        const prevNode = nodes.find(n => n.id === scheduleNodes[k - 1]);
+                        if (prevNode) {
+                            const pdx = fromNode.x - prevNode.x;
+                            const pdy = fromNode.y - prevNode.y;
+                            prevHeading = (Math.atan2(pdy, pdx) * 180 / Math.PI + 360) % 360;
+                        }
+                    }
+
+                    const angleDiff = ((segHeading - prevHeading + 540) % 360) - 180;
 
                     if (t >= tDepart) {
                         // Robot is moving on the segment
                         const progress = (t - tDepart) / travelTime;
                         x = fromNode.x + (toNode.x - fromNode.x) * progress;
                         y = fromNode.y + (toNode.y - fromNode.y) * progress;
+
+                        if (Math.abs(angleDiff) > 10 && progress < 0.3) {
+                            const turnEase = progress / 0.3;
+                            heading = prevHeading + angleDiff * turnEase;
+                            turningAngle = Math.abs(Math.round(angleDiff));
+                            const dir = angleDiff > 0 ? "Right (Clockwise)" : "Left (Counter-Clockwise)";
+                            turnStatus = `Turning ${turningAngle}° ${dir}`;
+                            status = "TURNING AT INTERSECTION";
+                        } else {
+                            heading = segHeading;
+                            turningAngle = Math.abs(Math.round(angleDiff));
+                            turnStatus = Math.abs(angleDiff) > 10 ? `Turn: ${turningAngle}° Completed` : "Straight (0°)";
+                            status = "MOVING";
+                        }
                     } else {
                         // Robot is waiting at fromNode due to scheduled traffic delay
                         x = fromNode.x;
                         y = fromNode.y;
+                        heading = prevHeading;
+                        status = "WAITING (TRAFFIC DELAY)";
+                        turnStatus = "Holding Position";
                     }
 
                     return {
                         ...veh,
                         x,
-                        y
+                        y,
+                        heading,
+                        turningAngle,
+                        turnStatus,
+                        status,
+                        fromNodeLabel: fromNode.label || fromNode.id,
+                        toNodeLabel: toNode.label || toNode.id,
+                        segmentDistance: distance
                     };
                 });
                 return updated;
@@ -752,6 +822,62 @@ export default function WarehouseSimulation() {
                     </div>
                 </div>
 
+                {/* Simulation Mode Tabs */}
+                <div style={{
+                    display: "flex",
+                    background: "rgba(255, 255, 255, 0.03)",
+                    border: "1px solid rgba(255, 255, 255, 0.08)",
+                    borderRadius: "12px",
+                    padding: "4px",
+                    gap: "6px"
+                }}>
+                    <button
+                        onClick={() => setActiveTab("schematic")}
+                        style={{
+                            flex: 1,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            gap: "6px",
+                            padding: "8px 6px",
+                            borderRadius: "8px",
+                            fontSize: "12px",
+                            fontWeight: 700,
+                            cursor: "pointer",
+                            border: "none",
+                            background: activeTab === "schematic" ? "#FFFFFF" : "transparent",
+                            color: activeTab === "schematic" ? "#111827" : "#9CA3AF",
+                            boxShadow: activeTab === "schematic" ? "0 2px 8px rgba(0,0,0,0.25)" : "none",
+                            transition: "all 0.2s ease"
+                        }}
+                    >
+                        <Sparkles size={13} style={{ color: activeTab === "schematic" ? "#10B981" : "#9CA3AF" }} />
+                        Schematic Grid
+                    </button>
+                    <button
+                        onClick={() => setActiveTab("dark")}
+                        style={{
+                            flex: 1,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            gap: "6px",
+                            padding: "8px 6px",
+                            borderRadius: "8px",
+                            fontSize: "12px",
+                            fontWeight: 700,
+                            cursor: "pointer",
+                            border: "none",
+                            background: activeTab === "dark" ? "#10B981" : "transparent",
+                            color: activeTab === "dark" ? "#000000" : "#9CA3AF",
+                            transition: "all 0.2s ease"
+                        }}
+                    >
+                        <Layers size={13} />
+                        Dark Canvas
+                    </button>
+                </div>
+
                 {/* Robot Configuration Section */}
                 <div style={{
                     marginTop: "12px",
@@ -875,10 +1001,33 @@ export default function WarehouseSimulation() {
 
             </div>
 
-            {/* Right Panel */}
-            <div style={styles.rightPanel}>
-                <div style={styles.headerRow}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+            {/* Right Panel / Simulation Tabs */}
+            {activeTab === "schematic" ? (
+                <div style={{ flex: 1, height: "100%", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                    <SchematicSimulation
+                        nodes={nodes}
+                        setNodes={setNodes}
+                        edges={edges}
+                        setEdges={setEdges}
+                        vehicles={vehicles}
+                        isSimulating={isSimulating}
+                        toggleSimulation={toggleSimulation}
+                        robotRoutes={robotRoutes}
+                        handleRouteChange={handleRouteChange}
+                        vehicleCount={vehicleCount}
+                        plotKey={plotKey}
+                        activeLogs={activeLogs}
+                        setActiveLogs={setActiveLogs}
+                        onSwitchTab={setActiveTab}
+                        saveRobotRoutesToDb={saveRobotRoutesToDb}
+                    />
+                </div>
+            ) : (
+                <>
+                    {/* Right Panel (Dark Canvas) */}
+                    <div style={styles.rightPanel}>
+                        <div style={styles.headerRow}>
+                            <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
                         <button
                             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
                             style={{
@@ -905,6 +1054,58 @@ export default function WarehouseSimulation() {
                         </div>
                     </div>
 
+                    {/* View Mode Tabs in Header */}
+                    <div style={{
+                        display: "flex",
+                        alignItems: "center",
+                        background: "rgba(255, 255, 255, 0.04)",
+                        border: "1px solid rgba(255, 255, 255, 0.08)",
+                        borderRadius: "10px",
+                        padding: "3px",
+                        gap: "4px"
+                    }}>
+                        <button
+                            onClick={() => setActiveTab("schematic")}
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "6px",
+                                padding: "6px 12px",
+                                borderRadius: "7px",
+                                fontSize: "12px",
+                                fontWeight: 700,
+                                cursor: "pointer",
+                                border: "none",
+                                background: activeTab === "schematic" ? "#FFFFFF" : "transparent",
+                                color: activeTab === "schematic" ? "#111827" : "#9CA3AF",
+                                boxShadow: activeTab === "schematic" ? "0 2px 6px rgba(0,0,0,0.15)" : "none",
+                                transition: "all 0.2s ease"
+                            }}
+                        >
+                            <Sparkles size={13} style={{ color: activeTab === "schematic" ? "#10B981" : "#9CA3AF" }} />
+                            Schematic Grid (White)
+                        </button>
+                        <button
+                            onClick={() => setActiveTab("dark")}
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "6px",
+                                padding: "6px 12px",
+                                borderRadius: "7px",
+                                fontSize: "12px",
+                                fontWeight: 700,
+                                cursor: "pointer",
+                                border: "none",
+                                background: activeTab === "dark" ? "#10B981" : "transparent",
+                                color: activeTab === "dark" ? "#000000" : "#9CA3AF",
+                                transition: "all 0.2s ease"
+                            }}
+                        >
+                            <Layers size={13} />
+                            Dark Canvas
+                        </button>
+                    </div>
 
                     {/* Toolbar */}
                     <div style={styles.toolbar}>
@@ -1208,6 +1409,8 @@ export default function WarehouseSimulation() {
                     <div ref={terminalEndRef} />
                 </div>
             </div>
-        </div>
+        </>
+    )}
+</div>
     );
 }

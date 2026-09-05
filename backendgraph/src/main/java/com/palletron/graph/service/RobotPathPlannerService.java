@@ -192,7 +192,8 @@ public class RobotPathPlannerService {
         // Base sorting: freeRunTime ascending, tie-breaker by ID
         zeroInDegree.sort((a, b) -> {
             int c = Double.compare(a.freeRunTime, b.freeRunTime);
-            if (c != 0) return c;
+            if (c != 0)
+                return c;
             return Integer.compare(a.id, b.id);
         });
         queue.addAll(zeroInDegree);
@@ -205,7 +206,8 @@ public class RobotPathPlannerService {
             List<Robot> neighbors = new ArrayList<>(adj.get(u));
             neighbors.sort((a, b) -> {
                 int c = Double.compare(a.freeRunTime, b.freeRunTime);
-                if (c != 0) return c;
+                if (c != 0)
+                    return c;
                 return Integer.compare(a.id, b.id);
             });
 
