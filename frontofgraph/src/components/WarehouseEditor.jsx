@@ -467,13 +467,30 @@ export default function WarehouseEditor() {
 
         if (draggingNodeId) {
             const { x, y } = getSVGCoordinates(e);
+            const newX = Math.min(Math.max(20, Math.round((x - dragOffset.x) / 10) * 10), 800);
+            const newY = Math.min(Math.max(20, Math.round((y - dragOffset.y) / 10) * 10), 500);
             setNodes(nodes.map(n => {
                 if (n.id === draggingNodeId) {
-                    return {
+                    const nextNode = {
                         ...n,
-                        x: Math.min(Math.max(20, Math.round((x - dragOffset.x) / 10) * 10), 800),
-                        y: Math.min(Math.max(20, Math.round((y - dragOffset.y) / 10) * 10), 500)
+                        x: newX,
+                        y: newY
                     };
+                    if (nextNode.connectionAngles) {
+                        delete nextNode.connectionAngles;
+                    }
+                    return nextNode;
+                }
+                if (n.connectionAngles && n.connectionAngles[draggingNodeId] !== undefined) {
+                    const nextAngles = { ...n.connectionAngles };
+                    delete nextAngles[draggingNodeId];
+                    const nextNode = { ...n };
+                    if (Object.keys(nextAngles).length > 0) {
+                        nextNode.connectionAngles = nextAngles;
+                    } else {
+                        delete nextNode.connectionAngles;
+                    }
+                    return nextNode;
                 }
                 return n;
             }));

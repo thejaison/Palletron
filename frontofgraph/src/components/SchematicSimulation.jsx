@@ -133,7 +133,22 @@ export default function SchematicSimulation({
 
             setNodes(prev => prev.map(n => {
                 if (n.id === draggingNodeId) {
-                    return { ...n, x: newX, y: newY };
+                    const nextNode = { ...n, x: newX, y: newY };
+                    if (nextNode.connectionAngles) {
+                        delete nextNode.connectionAngles;
+                    }
+                    return nextNode;
+                }
+                if (n.connectionAngles && n.connectionAngles[draggingNodeId] !== undefined) {
+                    const nextAngles = { ...n.connectionAngles };
+                    delete nextAngles[draggingNodeId];
+                    const nextNode = { ...n };
+                    if (Object.keys(nextAngles).length > 0) {
+                        nextNode.connectionAngles = nextAngles;
+                    } else {
+                        delete nextNode.connectionAngles;
+                    }
+                    return nextNode;
                 }
                 return n;
             }));
@@ -198,11 +213,15 @@ export default function SchematicSimulation({
         const centerY = (minY + maxY) / 2;
         const scaleFactor = 1.35; // 35% more spread
 
-        setNodes(prev => prev.map(n => ({
-            ...n,
-            x: Math.round((centerX + (n.x - centerX) * scaleFactor) / 10) * 10,
-            y: Math.round((centerY + (n.y - centerY) * scaleFactor) / 10) * 10
-        })));
+        setNodes(prev => prev.map(n => {
+            const nextNode = {
+                ...n,
+                x: Math.round((centerX + (n.x - centerX) * scaleFactor) / 10) * 10,
+                y: Math.round((centerY + (n.y - centerY) * scaleFactor) / 10) * 10
+            };
+            delete nextNode.connectionAngles;
+            return nextNode;
+        }));
 
         setSaveToast("Spread out layout!");
         setTimeout(() => setSaveToast(""), 2500);
@@ -259,10 +278,13 @@ export default function SchematicSimulation({
                 if (n.id === iNode.id) {
                     const nextAngles = { ...(n.connectionAngles || {}) };
                     delete nextAngles[neighborNode.id];
-                    return {
-                        ...n,
-                        connectionAngles: nextAngles
-                    };
+                    const nextNode = { ...n };
+                    if (Object.keys(nextAngles).length > 0) {
+                        nextNode.connectionAngles = nextAngles;
+                    } else {
+                        delete nextNode.connectionAngles;
+                    }
+                    return nextNode;
                 }
                 return n;
             }));
@@ -499,6 +521,8 @@ export default function SchematicSimulation({
                             ✓ {saveToast}
                         </span>
                     )}
+
+
                 </div>
 
                 {/* Right: Zoom Controls & White Terminal Toggle */}
@@ -831,13 +855,41 @@ export default function SchematicSimulation({
 
                                 return (
                                     <g key={veh.id || idx}>
+                                        {/* Edge Occupied Stop Ring */}
+                                        {veh.status?.includes("OCCUPIED") && (
+                                            <circle
+                                                cx={veh.x}
+                                                cy={veh.y}
+                                                r="20"
+                                                fill="rgba(239, 68, 68, 0.08)"
+                                                stroke="#EF4444"
+                                                strokeWidth="2"
+                                                strokeDasharray="4 3"
+                                                opacity="0.9"
+                                            />
+                                        )}
+
+                                        {/* Standoff Indicator Ring */}
+                                        {veh.status?.includes("STANDOFF") && (
+                                            <circle
+                                                cx={veh.x}
+                                                cy={veh.y}
+                                                r="20"
+                                                fill="none"
+                                                stroke="#F59E0B"
+                                                strokeWidth="2"
+                                                strokeDasharray="4 3"
+                                                opacity="0.9"
+                                            />
+                                        )}
+
                                         {/* Soft outer glow aura */}
                                         <circle
                                             cx={veh.x}
                                             cy={veh.y}
                                             r="16"
-                                            fill={color}
-                                            opacity="0.22"
+                                            fill={veh.status?.includes("OCCUPIED") ? "#EF4444" : (veh.status?.includes("STANDOFF") ? "#F59E0B" : (veh.status?.includes("TURNING") ? "#F59E0B" : color))}
+                                            opacity={veh.status?.includes("OCCUPIED") ? "0.35" : (veh.status?.includes("STANDOFF") ? "0.35" : (veh.status?.includes("TURNING") ? "0.35" : "0.22"))}
                                         />
 
                                         {/* Main AGV Dot */}
@@ -846,7 +898,7 @@ export default function SchematicSimulation({
                                             cy={veh.y}
                                             r="9"
                                             fill={color}
-                                            stroke="#FFFFFF"
+                                            stroke={veh.status?.includes("OCCUPIED") ? "#EF4444" : (veh.status?.includes("STANDOFF") ? "#F59E0B" : (veh.status?.includes("TURNING") ? "#F59E0B" : "#FFFFFF"))}
                                             strokeWidth="2.5"
                                             filter="url(#badge-shadow)"
                                         />
@@ -855,20 +907,20 @@ export default function SchematicSimulation({
                                         <circle
                                             cx={pointerX}
                                             cy={pointerY}
-                                            r="2.5"
-                                            fill="#111827"
+                                            r={veh.status?.includes("TURNING") ? "3.2" : "2.5"}
+                                            fill={veh.status?.includes("TURNING") ? "#B45309" : "#111827"}
                                         />
 
                                         {/* Minimal Robot Label Badge */}
                                         <g transform={`translate(${veh.x}, ${veh.y - 18})`}>
                                             <rect
-                                                x="-20"
+                                                x={veh.status?.includes("OCCUPIED") ? "-40" : (veh.status?.includes("STANDOFF") ? "-36" : "-20")}
                                                 y="-10"
-                                                width="40"
+                                                width={veh.status?.includes("OCCUPIED") ? "80" : (veh.status?.includes("STANDOFF") ? "72" : "40")}
                                                 height="13"
                                                 rx="3"
-                                                fill="#111827"
-                                                opacity="0.85"
+                                                fill={veh.status?.includes("OCCUPIED") ? "#DC2626" : (veh.status?.includes("STANDOFF") ? "#B45309" : "#111827")}
+                                                opacity="0.92"
                                             />
                                             <text
                                                 x="0"
@@ -879,7 +931,9 @@ export default function SchematicSimulation({
                                                 fill="#FFFFFF"
                                                 fontFamily="'Outfit', sans-serif"
                                             >
-                                                R{idx + 1} {turningAngle > 0 ? `(${turningAngle}°)` : ""}
+                                                {veh.status?.includes("OCCUPIED")
+                                                    ? `R${idx + 1} (Edge Occupied)`
+                                                    : (veh.status?.includes("STANDOFF") ? `R${idx + 1} (3/4 Standoff)` : `R${idx + 1} ${turningAngle > 0 ? `(${turningAngle}°)` : ""}`)}
                                             </text>
                                         </g>
                                     </g>
@@ -1037,8 +1091,12 @@ export default function SchematicSimulation({
                                                     fontWeight: 700,
                                                     padding: "2px 5px",
                                                     borderRadius: "3px",
-                                                    background: isSimulating ? "#E0F2FE" : "#F3F4F6",
-                                                    color: isSimulating ? "#0284C7" : "#6B7280"
+                                                    background: isSimulating
+                                                        ? (status.includes("OCCUPIED") ? "#FEE2E2" : (status.includes("STANDOFF") ? "#FEF3C7" : (status.includes("TURNING") ? "#FEF3C7" : (status.includes("FINAL") ? "#ECFDF5" : "#E0F2FE"))))
+                                                        : "#F3F4F6",
+                                                    color: isSimulating
+                                                        ? (status.includes("OCCUPIED") ? "#DC2626" : (status.includes("STANDOFF") ? "#B45309" : (status.includes("TURNING") ? "#B45309" : (status.includes("FINAL") ? "#059669" : "#0284C7"))))
+                                                        : "#6B7280"
                                                 }}>
                                                     {status}
                                                 </span>
@@ -1055,9 +1113,21 @@ export default function SchematicSimulation({
                                                 </div>
                                             </div>
 
+                                            {veh?.turnStatus && (
+                                                <div style={{
+                                                    fontSize: "10px",
+                                                    color: status.includes("OCCUPIED") ? "#DC2626" : ((status.includes("TURNING") || status.includes("STANDOFF")) ? "#B45309" : (status.includes("FINAL") ? "#059669" : "#6B7280")),
+                                                    fontWeight: 600
+                                                }}>
+                                                    Status: {veh.turnStatus}
+                                                </div>
+                                            )}
+
                                             <div style={{ fontSize: "10px", color: "#6B7280" }}>
                                                 Route: <strong>{startNode?.label || "L1"}</strong> ➔ <strong>{endNode?.label || "U1"}</strong>
-                                                <span style={{ marginLeft: "6px" }}>Speed: {route.speedCmPerSec || 50} cm/s</span>
+                                                <span style={{ marginLeft: "6px" }}>
+                                                    Speed: <strong>{route.speedCmPerSec || 50} cm/s</strong>
+                                                </span>
                                             </div>
                                         </div>
                                     );
