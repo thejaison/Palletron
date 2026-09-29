@@ -12,7 +12,8 @@ import {
     Save,
     Move,
     X,
-    RotateCcw
+    RotateCcw,
+    Gauge
 } from "lucide-react";
 
 export default function SchematicSimulation({
@@ -936,6 +937,32 @@ export default function SchematicSimulation({
                                                     : (veh.status?.includes("STANDOFF") ? `R${idx + 1} (3/4 Standoff)` : `R${idx + 1} ${turningAngle > 0 ? `(${turningAngle}°)` : ""}`)}
                                             </text>
                                         </g>
+
+                                        {/* Kinematics Live Speed Badge */}
+                                        <g transform={`translate(${veh.x}, ${veh.y + 15})`}>
+                                            <rect
+                                                x="-24"
+                                                y="-6"
+                                                width="48"
+                                                height="13"
+                                                rx="3"
+                                                fill="#111827"
+                                                stroke={veh.motionPhase === "CRUISING" ? "#3B82F6" : (veh.motionPhase === "ACCELERATING" ? "#10B981" : (veh.motionPhase === "DECELERATING" ? "#F59E0B" : "rgba(255,255,255,0.2)"))}
+                                                strokeWidth="0.8"
+                                                opacity="0.92"
+                                            />
+                                            <text
+                                                x="0"
+                                                y="3"
+                                                textAnchor="middle"
+                                                fontSize="7.5px"
+                                                fontWeight="800"
+                                                fill={veh.currentSpeed > 0 ? "#10B981" : "#9CA3AF"}
+                                                fontFamily="'Outfit', monospace"
+                                            >
+                                                {(veh.currentSpeed || 0).toFixed(1)} cm/s
+                                            </text>
+                                        </g>
                                     </g>
                                 );
                             })}
@@ -1102,6 +1129,57 @@ export default function SchematicSimulation({
                                                 </span>
                                             </div>
 
+                                            {/* Live Speed & Kinematics Monitor */}
+                                            <div style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "space-between",
+                                                background: isSimulating ? "#FFFFFF" : "#F3F4F6",
+                                                border: "1px solid #E5E7EB",
+                                                borderRadius: "6px",
+                                                padding: "4px 8px",
+                                                marginTop: "2px"
+                                            }}>
+                                                <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+                                                    <Gauge size={12} style={{ color: isSimulating && (veh?.currentSpeed || 0) > 0 ? "#10B981" : "#6B7280" }} />
+                                                    <span style={{ fontSize: "10px", fontWeight: 600, color: "#374151" }}>Live Speed:</span>
+                                                    <span style={{
+                                                        fontSize: "12px",
+                                                        fontWeight: 800,
+                                                        fontFamily: "monospace",
+                                                        color: isSimulating && (veh?.currentSpeed || 0) > 0 ? "#059669" : "#6B7280"
+                                                    }}>
+                                                        {isSimulating ? `${(veh?.currentSpeed || 0).toFixed(1)} cm/s` : "0.0 cm/s"}
+                                                    </span>
+                                                </div>
+                                                <span style={{
+                                                    fontSize: "9px",
+                                                    fontWeight: 700,
+                                                    padding: "1px 5px",
+                                                    borderRadius: "3px",
+                                                    background: !isSimulating
+                                                        ? "#E5E7EB"
+                                                        : (veh?.motionPhase === "ACCELERATING"
+                                                            ? "#DCFCE7"
+                                                            : (veh?.motionPhase === "CRUISING"
+                                                                ? "#E0F2FE"
+                                                                : (veh?.motionPhase === "DECELERATING"
+                                                                    ? "#FEF3C7"
+                                                                    : "#F3F4F6"))),
+                                                    color: !isSimulating
+                                                        ? "#6B7280"
+                                                        : (veh?.motionPhase === "ACCELERATING"
+                                                            ? "#15803D"
+                                                            : (veh?.motionPhase === "CRUISING"
+                                                                ? "#0369A1"
+                                                                : (veh?.motionPhase === "DECELERATING"
+                                                                    ? "#B45309"
+                                                                    : "#6B7280")))
+                                                }}>
+                                                    {isSimulating ? (veh?.motionPhase || "STOPPED") : "STANDBY"}
+                                                </span>
+                                            </div>
+
                                             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px", fontSize: "11px", marginTop: "2px" }}>
                                                 <div style={{ display: "flex", alignItems: "center", gap: "4px", color: "#4B5563" }}>
                                                     <Compass size={11} style={{ color: "#3B82F6", transform: `rotate(${heading}deg)` }} />
@@ -1126,8 +1204,13 @@ export default function SchematicSimulation({
                                             <div style={{ fontSize: "10px", color: "#6B7280" }}>
                                                 Route: <strong>{startNode?.label || "L1"}</strong> ➔ <strong>{endNode?.label || "U1"}</strong>
                                                 <span style={{ marginLeft: "6px" }}>
-                                                    Speed: <strong>{route.speedCmPerSec || 50} cm/s</strong>
+                                                    Target: <strong>{route.speedCmPerSec || 50} cm/s</strong>
                                                 </span>
+                                            </div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px", fontSize: "9px", color: "#9CA3AF" }}>
+                                                <span>Accel: <strong>{route.accelTimeSec !== undefined ? route.accelTimeSec : 1.0}s</strong> ({((route.speedCmPerSec || 50) / (route.accelTimeSec || 1.0)).toFixed(1)} cm/s²)</span>
+                                                <span>Decel: <strong>{route.decelTimeSec !== undefined ? route.decelTimeSec : 1.0}s</strong> ({((route.speedCmPerSec || 50) / (route.decelTimeSec || 1.0)).toFixed(1)} cm/s²)</span>
                                             </div>
                                         </div>
                                     );

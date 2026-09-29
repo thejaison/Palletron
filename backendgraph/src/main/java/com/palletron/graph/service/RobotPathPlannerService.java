@@ -2,6 +2,8 @@ package com.palletron.graph.service;
 
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
+
+import com.palletron.graph.dto.RobotInstruction;
 import com.palletron.graph.entity.GraphReo;
 import com.palletron.graph.entity.MapPlot;
 import com.palletron.graph.repository.GraphReoRepository;
@@ -27,15 +29,29 @@ public class RobotPathPlannerService {
         public int id;
         public String startNodeId;
         public String endNodeId;
+
         public double speedCmPerSec;
+        public double accelerationCmPerSec2;
+        public double decelerationCmPerSec2;
     }
 
     // DTO for planning response
     public static class RobotResponse {
         public int id;
+
         public List<String> path;
+
         public List<String> scheduleNodes;
+
         public List<Double> scheduleTimes;
+
+        public double speedCmPerSec;
+
+        public double accelerationCmPerSec2;
+
+        public double decelerationCmPerSec2;
+
+        public List<RobotInstruction> instructions;
     }
 
     public List<RobotResponse> planRoutes(String keyId, List<RobotRequest> robotRequests) throws Exception {
@@ -123,10 +139,19 @@ public class RobotPathPlannerService {
                 throw new IllegalArgumentException("Robot start or end node not found in graph.");
             }
 
-            Robot r = new Robot(req.id, src, dst, req.speedCmPerSec);
+            Robot r = new Robot(req.id, src, dst, req.speedCmPerSec, req.accelerationCmPerSec2,
+                    req.decelerationCmPerSec2);
             r.path = shortestPath(r.src, r.dst, connections, weights);
             r.freeRunDistance = pathDistance(r.path, weights);
-            r.freeRunTime = r.speedCmPerSec > 0 ? r.freeRunDistance / r.speedCmPerSec : Double.POSITIVE_INFINITY;
+            r.freeRunTime = 0.0;
+            for (int i = 0; i + 1 < r.path.size(); i++) {
+                double segDist = weights[r.path.get(i)][r.path.get(i + 1)];
+                double segTravel = computeTravelTime(segDist, r.speedCmPerSec, r.accelerationCmPerSec2,
+                        r.decelerationCmPerSec2);
+                int prevI = i >= 1 ? r.path.get(i - 1) : -1;
+                double segTurn = computeTurnDuration(prevI, r.path.get(i), r.path.get(i + 1), nodes, segTravel);
+                r.freeRunTime += segTurn + segTravel;
+            }
             robots.add(r);
         }
 
@@ -244,8 +269,14 @@ public class RobotPathPlannerService {
             double[] t_min = new double[r.path.size()];
             t_min[0] = 0.0;
             for (int idx = 1; idx < r.path.size(); idx++) {
-                double travelTime = weights[r.path.get(idx - 1)][r.path.get(idx)] / r.speedCmPerSec;
-                t_min[idx] = t_min[idx - 1] + travelTime;
+                int prevIdx = idx >= 2 ? r.path.get(idx - 2) : -1;
+                int posIdx = r.path.get(idx - 1);
+                int nextIdx = r.path.get(idx);
+                double segDist = weights[posIdx][nextIdx];
+                double travelTime = computeTravelTime(segDist, r.speedCmPerSec, r.accelerationCmPerSec2,
+                        r.decelerationCmPerSec2);
+                double turnDuration = computeTurnDuration(prevIdx, posIdx, nextIdx, nodes, travelTime);
+                t_min[idx] = t_min[idx - 1] + turnDuration + travelTime;
             }
 
             // Apply opposing edge wait constraints from higher priority robots
@@ -258,8 +289,14 @@ public class RobotPathPlannerService {
 
             // Propagate t_min forward to maintain consistent arrival timeline
             for (int idx = 1; idx < r.path.size(); idx++) {
-                double travelTime = weights[r.path.get(idx - 1)][r.path.get(idx)] / r.speedCmPerSec;
-                t_min[idx] = Math.max(t_min[idx], t_min[idx - 1] + travelTime);
+                int prevIdx = idx >= 2 ? r.path.get(idx - 2) : -1;
+                int posIdx = r.path.get(idx - 1);
+                int nextIdx = r.path.get(idx);
+                double segDist = weights[posIdx][nextIdx];
+                double travelTime = computeTravelTime(segDist, r.speedCmPerSec, r.accelerationCmPerSec2,
+                        r.decelerationCmPerSec2);
+                double turnDuration = computeTurnDuration(prevIdx, posIdx, nextIdx, nodes, travelTime);
+                t_min[idx] = Math.max(t_min[idx], t_min[idx - 1] + turnDuration + travelTime);
             }
 
             double t = 0.0;
@@ -269,40 +306,47 @@ public class RobotPathPlannerService {
             reserveNode(reservedNode, pos, t - safetyMarginSec, t + safetyMarginSec);
 
             for (int idx = 1; idx < r.path.size(); idx++) {
+                int prevIdx = idx >= 2 ? r.path.get(idx - 2) : -1;
                 int next = r.path.get(idx);
-                double travelTime = weights[pos][next] / r.speedCmPerSec;
+                double edgeDist = weights[pos][next];
+                double travelTime = computeTravelTime(edgeDist, r.speedCmPerSec, r.accelerationCmPerSec2,
+                        r.decelerationCmPerSec2);
+                double turnDuration = computeTurnDuration(prevIdx, pos, next, nodes, travelTime);
+                double stepDuration = turnDuration + travelTime;
 
                 // Adjust tStart to respect t_min constraint
-                double tStart = Math.max(t, t_min[idx] - travelTime);
-                double tEnd = tStart + travelTime;
+                double tStart = Math.max(t, t_min[idx] - stepDuration);
+                double tEnd = tStart + stepDuration;
 
                 while (true) {
                     // 1. Swap conflict on opposing edge: cannot advance onto shared single corridor
                     double swapPushTo = -1;
                     for (double[] iv : reservedEdge.getOrDefault(next + "_" + pos, Collections.emptyList())) {
-                        if (overlaps(tStart, tEnd, iv[0], iv[1])) {
+                        if (overlaps(tStart + turnDuration, tEnd, iv[0], iv[1])) {
                             swapPushTo = Math.max(swapPushTo, iv[1]);
                         }
                     }
 
                     if (swapPushTo > 0) {
                         tStart = swapPushTo;
-                        tEnd = tStart + travelTime;
+                        tEnd = tStart + stepDuration;
                         continue;
                     }
 
-                    // 2. Same-direction edge occupancy: another vehicle already on edge (pos -> next)
-                    // If edge is occupied, robot must stop itself at pos until the preceding vehicle clears the edge
+                    // 2. Same-direction edge occupancy: another vehicle already on edge (pos ->
+                    // next)
+                    // If edge is occupied, robot must stop itself at pos until the preceding
+                    // vehicle clears the edge
                     double sameEdgePushTo = -1;
                     for (double[] iv : reservedEdge.getOrDefault(pos + "_" + next, Collections.emptyList())) {
-                        if (overlaps(tStart, tEnd, iv[0], iv[1])) {
+                        if (overlaps(tStart + turnDuration, tEnd, iv[0], iv[1])) {
                             sameEdgePushTo = Math.max(sameEdgePushTo, iv[1]);
                         }
                     }
 
                     if (sameEdgePushTo > 0) {
                         tStart = sameEdgePushTo;
-                        tEnd = tStart + travelTime;
+                        tEnd = tStart + stepDuration;
                         continue;
                     }
 
@@ -318,18 +362,22 @@ public class RobotPathPlannerService {
                         break;
 
                     // 3/4th Distance Advance Algorithm:
-                    // Only advance 3/4th of the edge if the edge does NOT have any other vehicle on it.
-                    // If the edge has another vehicle on it, the robot stops itself at pos until clear.
-                    double standoffArrival = tStart + 0.75 * travelTime;
+                    // Only advance 3/4th of the edge if the edge does NOT have any other vehicle on
+                    // it.
+                    // If the edge has another vehicle on it, the robot stops itself at pos until
+                    // clear.
+                    double t34TravelTime = computeTravelTime(0.75 * edgeDist, r.speedCmPerSec, r.accelerationCmPerSec2,
+                            r.decelerationCmPerSec2);
+                    double standoffArrival = tStart + turnDuration + t34TravelTime;
                     boolean edgeOccupied = false;
                     for (double[] iv : reservedEdge.getOrDefault(pos + "_" + next, Collections.emptyList())) {
-                        if (overlaps(tStart, standoffArrival, iv[0], iv[1])) {
+                        if (overlaps(tStart + turnDuration, standoffArrival, iv[0], iv[1])) {
                             edgeOccupied = true;
                             break;
                         }
                     }
                     for (double[] iv : reservedEdge.getOrDefault(next + "_" + pos, Collections.emptyList())) {
-                        if (overlaps(tStart, standoffArrival, iv[0], iv[1])) {
+                        if (overlaps(tStart + turnDuration, standoffArrival, iv[0], iv[1])) {
                             edgeOccupied = true;
                             break;
                         }
@@ -338,13 +386,14 @@ public class RobotPathPlannerService {
                     if (edgeOccupied) {
                         // Edge is occupied: robot stops itself at pos until destination node clears
                         tStart = nodePushTo;
-                        tEnd = tStart + travelTime;
+                        tEnd = tStart + stepDuration;
                         continue;
                     }
 
                     // Edge is vacant: advance 3/4 distance to standoff waypoint
-                    double remTravelTime = 0.25 * travelTime;
-                    tEnd = Math.max(tStart + travelTime, nodePushTo + remTravelTime);
+                    double remTravelTime = computeTravelTime(0.25 * edgeDist, r.speedCmPerSec, r.accelerationCmPerSec2,
+                            r.decelerationCmPerSec2);
+                    tEnd = Math.max(tStart + stepDuration, Math.max(standoffArrival, nodePushTo) + remTravelTime);
 
                     boolean recheckNeeded = false;
                     for (double[] iv : reservedNode.getOrDefault(next, Collections.emptyList())) {
@@ -358,7 +407,8 @@ public class RobotPathPlannerService {
                         break;
                 }
 
-                reserveEdge(reservedEdge, pos, next, tStart, tEnd);
+                reserveNode(reservedNode, pos, tStart - safetyMarginSec, tStart + turnDuration + safetyMarginSec);
+                reserveEdge(reservedEdge, pos, next, tStart + turnDuration, tEnd);
                 reserveNode(reservedNode, next, tEnd - safetyMarginSec, tEnd + safetyMarginSec);
 
                 r.scheduleNodes.add(next);
@@ -385,6 +435,10 @@ public class RobotPathPlannerService {
             }
 
             res.scheduleTimes = r.scheduleTimes;
+            res.speedCmPerSec = r.speedCmPerSec;
+            res.accelerationCmPerSec2 = r.accelerationCmPerSec2;
+            res.decelerationCmPerSec2 = r.decelerationCmPerSec2;
+            res.instructions = generateInstructions(r, nodes, weights);
             responses.add(res);
         }
 
@@ -406,19 +460,109 @@ public class RobotPathPlannerService {
     private static class Robot {
         int id, src, dst;
         double speedCmPerSec;
+        double accelerationCmPerSec2;
+        double decelerationCmPerSec2;
+
         List<Integer> path = new ArrayList<>();
+        @SuppressWarnings("unused")
         double freeRunDistance;
         double freeRunTime;
         List<Integer> scheduleNodes = new ArrayList<>();
         List<Double> scheduleTimes = new ArrayList<>();
 
-        Robot(int id, int src, int dst, double speedCmPerSec) {
+        Robot(int id, int src, int dst,
+                double speedCmPerSec,
+                double accelerationCmPerSec2,
+                double decelerationCmPerSec2) {
+
             this.id = id;
             this.src = src;
             this.dst = dst;
+
             this.speedCmPerSec = speedCmPerSec;
+            this.accelerationCmPerSec2 = accelerationCmPerSec2;
+            this.decelerationCmPerSec2 = decelerationCmPerSec2;
         }
     }
+
+    private static List<RobotInstruction> generateInstructions(
+            Robot robot,
+            List<Map<String, Object>> nodes,
+            double[][] weights) {
+
+        List<RobotInstruction> instructions = new ArrayList<>();
+
+        if (robot.path.isEmpty()) {
+            return instructions;
+        }
+
+        for (int i = 0; i < robot.path.size() - 1; i++) {
+
+            int current = robot.path.get(i);
+            int next = robot.path.get(i + 1);
+
+            // Add turn instruction before moving to next node
+            if (i > 0) {
+
+                int previous = robot.path.get(i - 1);
+
+                double angle = calculateTurnAngle(
+                        previous,
+                        current,
+                        next,
+                        nodes);
+
+                if (Math.abs(angle) > 5.0) {
+
+                    RobotInstruction turn = new RobotInstruction();
+
+                    turn.speedCmPerSec = robot.speedCmPerSec;
+                    turn.accelerationCmPerSec2 = robot.accelerationCmPerSec2;
+                    turn.decelerationCmPerSec2 = robot.decelerationCmPerSec2;
+
+                    turn.distanceCm = 0.0;
+                    turn.angleDegrees = Math.abs(angle);
+
+                    if (angle > 0) {
+                        turn.command = "LEFT";
+                    } else {
+                        turn.command = "RIGHT";
+                    }
+
+                    instructions.add(turn);
+                }
+            }
+
+            // Forward instruction
+            RobotInstruction forward = new RobotInstruction();
+
+            forward.speedCmPerSec = robot.speedCmPerSec;
+            forward.accelerationCmPerSec2 = robot.accelerationCmPerSec2;
+            forward.decelerationCmPerSec2 = robot.decelerationCmPerSec2;
+
+            forward.command = "FORWARD";
+            forward.angleDegrees = 0.0;
+            forward.distanceCm = weights[current][next];
+
+            instructions.add(forward);
+        }
+
+        // Final stop
+        RobotInstruction stop = new RobotInstruction();
+
+        stop.speedCmPerSec = 0.0;
+        stop.accelerationCmPerSec2 = robot.accelerationCmPerSec2;
+        stop.decelerationCmPerSec2 = robot.decelerationCmPerSec2;
+
+        stop.command = "STOP";
+        stop.angleDegrees = 0.0;
+        stop.distanceCm = 0.0;
+
+        instructions.add(stop);
+
+        return instructions;
+    }
+
 
     private static List<Integer> shortestPath(int src, int dst, String[][] connections, double[][] weights) {
         int N = weights.length;
@@ -495,5 +639,122 @@ public class RobotPathPlannerService {
 
     private static void reserveEdge(Map<String, List<double[]>> map, int u, int v, double start, double end) {
         map.computeIfAbsent(u + "_" + v, k -> new ArrayList<>()).add(new double[] { start, end });
+    }
+
+    public static double computeTravelTime(
+            double distance,
+            double speed,
+            double acceleration,
+            double deceleration) {
+
+        if (speed <= 0.0 || distance <= 0.0) {
+            return 0.0;
+        }
+
+        if (acceleration <= 0.0 || deceleration <= 0.0) {
+            return distance / speed;
+        }
+
+        // Distance required to accelerate from 0 -> speed
+        double accelDistance = (speed * speed) / (2.0 * acceleration);
+
+        // Distance required to decelerate from speed -> 0
+        double decelDistance = (speed * speed) / (2.0 * deceleration);
+
+        double minimumDistanceForFullSpeed = accelDistance + decelDistance;
+
+        // Robot can reach target speed
+        if (distance >= minimumDistanceForFullSpeed) {
+
+            double accelTime = speed / acceleration;
+            double decelTime = speed / deceleration;
+
+            double cruiseDistance = distance - minimumDistanceForFullSpeed;
+
+            double cruiseTime = cruiseDistance / speed;
+
+            return accelTime + cruiseTime + decelTime;
+        }
+
+        // Triangular velocity profile
+        double peakSpeed = Math.sqrt(
+                (2.0 * distance * acceleration * deceleration)
+                        / (acceleration + deceleration));
+
+        double accelTime = peakSpeed / acceleration;
+        double decelTime = peakSpeed / deceleration;
+
+        return accelTime + decelTime;
+    }
+
+    public static double calculateTurnAngle(int prevIdx, int currIdx, int nextIdx, List<Map<String, Object>> nodes) {
+        if (prevIdx < 0 || currIdx < 0 || nextIdx < 0 || nodes == null) {
+            return 0.0;
+        }
+        if (prevIdx >= nodes.size() || currIdx >= nodes.size() || nextIdx >= nodes.size()) {
+            return 0.0;
+        }
+        Map<String, Object> pNode = nodes.get(prevIdx);
+        Map<String, Object> cNode = nodes.get(currIdx);
+        Map<String, Object> nNode = nodes.get(nextIdx);
+
+        double prevH = getSegmentHeading(pNode, cNode);
+        double segH = getSegmentHeading(cNode, nNode);
+
+        return ((segH - prevH + 540.0) % 360.0) - 180.0;
+    }
+
+    private static double getSegmentHeading(Map<String, Object> fromNode, Map<String, Object> toNode) {
+        if (fromNode == null || toNode == null)
+            return 0.0;
+        String fromType = (String) fromNode.get("type");
+        String toType = (String) toNode.get("type");
+        String toId = (String) toNode.get("id");
+        String fromId = (String) fromNode.get("id");
+
+        if ("intersection".equals(fromType) && fromNode.get("connectionAngles") instanceof Map) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> angles = (Map<String, Object>) fromNode.get("connectionAngles");
+            if (angles != null && angles.containsKey(toId) && angles.get(toId) instanceof Number) {
+                return ((Number) angles.get(toId)).doubleValue();
+            }
+        }
+        if ("intersection".equals(toType) && toNode.get("connectionAngles") instanceof Map) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> angles = (Map<String, Object>) toNode.get("connectionAngles");
+            if (angles != null && angles.containsKey(fromId) && angles.get(fromId) instanceof Number) {
+                return (((Number) angles.get(fromId)).doubleValue() + 180.0) % 360.0;
+            }
+        }
+        return getCompassAngle(fromNode, toNode);
+    }
+
+    private static double getCompassAngle(Map<String, Object> uNode, Map<String, Object> vNode) {
+        if (uNode == null || vNode == null)
+            return 0.0;
+        Number ux = (Number) uNode.get("x");
+        Number uy = (Number) uNode.get("y");
+        Number vx = (Number) vNode.get("x");
+        Number vy = (Number) vNode.get("y");
+        if (ux == null || uy == null || vx == null || vy == null)
+            return 0.0;
+        double cdx = vx.doubleValue() - ux.doubleValue();
+        double cdy = uy.doubleValue() - vy.doubleValue(); // Invert SVG y: Up is North (positive)
+        double deg = Math.toDegrees(Math.atan2(cdy, cdx));
+        return (deg + 360.0) % 360.0;
+    }
+
+    public static double computeTurnDuration(int prevIdx, int currIdx, int nextIdx, List<Map<String, Object>> nodes,
+            double travelTime) {
+        double angleDiff = calculateTurnAngle(prevIdx, currIdx, nextIdx, nodes);
+        double absAngle = Math.abs(angleDiff);
+
+        if (absAngle <= 5.0) {
+            return 0.0;
+        }
+
+        double desiredTurnTime = 0.6 + (absAngle / 180.0) * 1.2;
+        double maxTurnTime = travelTime * 0.40;
+        return Math.min(desiredTurnTime, maxTurnTime);
     }
 }

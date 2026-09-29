@@ -4,6 +4,7 @@ import com.palletron.graph.entity.GraphReo;
 import com.palletron.graph.entity.MapPlot;
 import com.palletron.graph.repository.GraphReoRepository;
 import com.palletron.graph.repository.MapPlotRepository;
+import com.palletron.graph.dto.RobotInstruction;
 import com.palletron.graph.service.RobotPathPlannerService;
 import com.palletron.graph.service.RobotPathPlannerService.RobotRequest;
 import com.palletron.graph.service.RobotPathPlannerService.RobotResponse;
@@ -178,8 +179,113 @@ public class RobotPathPlannerServiceTest {
 
         // R2 must NOT advance into L1->I1 while R1 is on that edge. It must wait at L1.
         // Once R1 clears L1->I1 at 1.0s, R2 can depart.
-        double r2DepartL1 = resp2.scheduleTimes.get(0);
         double r2ArriveI1 = resp2.scheduleTimes.get(1);
         assertTrue(r2ArriveI1 >= 1.0 + 1.0, "R2 must not arrive at I1 until R1 has cleared the edge plus transit time");
+    }
+
+    @Test
+    void testKinematicsAccelerationDeceleration() {
+        // Test trapezoidal profile: distance = 100cm, speed = 50cm/s, a = 50cm/s², d = 50cm/s²
+        // accelDist = 25cm, decelDist = 25cm, minDist = 50cm. Distance 100 >= 50 => T = 1.0 + (50/50) + 1.0 = 3.0s
+        double tTrapezoidal = RobotPathPlannerService.computeTravelTime(100.0, 50.0, 50.0, 50.0);
+        assertEquals(3.0, tTrapezoidal, 0.001);
+
+        // Test triangular profile: distance = 25cm, speed = 50cm/s, a = 50cm/s², d = 50cm/s²
+        // Distance 25 < 50 => T = sqrt(2 * 25 * 50 * 50 / 100) / 50 * 2 = sqrt(2.0) = 1.4142s
+        double tTriangular = RobotPathPlannerService.computeTravelTime(25.0, 50.0, 50.0, 50.0);
+        assertEquals(Math.sqrt(2.0), tTriangular, 0.001);
+
+        // Backward compatibility: acceleration <= 0 and deceleration <= 0 => distance / speed
+        double tLinear = RobotPathPlannerService.computeTravelTime(100.0, 50.0, 0.0, 0.0);
+        assertEquals(2.0, tLinear, 0.001);
+    }
+
+    @Test
+    void testInstructionGeneration() throws Exception {
+        // L1 (0,0) -> I1 (120,0) -> I2 (120,-80) -> U1 (200,-80)
+        // 1. FORWARD 120cm
+        // 2. LEFT 90°, distance 0cm
+        // 3. FORWARD 80cm
+        // 4. RIGHT 90°, distance 0cm
+        // 5. FORWARD 80cm
+        // 6. STOP, distance 0cm
+        String canvasData = "{"
+            + "\"nodes\": ["
+            + "  {\"id\": \"L1\", \"label\": \"L1\", \"type\": \"loading\", \"x\": 0, \"y\": 0},"
+            + "  {\"id\": \"I1\", \"label\": \"I1\", \"type\": \"intersection\", \"x\": 120, \"y\": 0},"
+            + "  {\"id\": \"I2\", \"label\": \"I2\", \"type\": \"intersection\", \"x\": 120, \"y\": -80},"
+            + "  {\"id\": \"U1\", \"label\": \"U1\", \"type\": \"unloading\", \"x\": 200, \"y\": -80}"
+            + "],"
+            + "\"edges\": ["
+            + "  {\"id\": \"e1\", \"from\": \"L1\", \"to\": \"I1\", \"distance\": 120.0},"
+            + "  {\"id\": \"e2\", \"from\": \"I1\", \"to\": \"I2\", \"distance\": 80.0},"
+            + "  {\"id\": \"e3\", \"from\": \"I2\", \"to\": \"U1\", \"distance\": 80.0}"
+            + "]"
+            + "}";
+
+        MapPlot plot = new MapPlot();
+        plot.setId(10L);
+        plot.setKeyId("instructions-key");
+        plot.setPlotName("Instructions Plot");
+
+        GraphReo graphReo = new GraphReo();
+        graphReo.setPlotId(10L);
+        graphReo.setCanvasData(canvasData);
+
+        when(mapPlotRepository.findByKeyId("instructions-key")).thenReturn(Optional.of(plot));
+        when(graphReoRepository.findById(10L)).thenReturn(Optional.of(graphReo));
+
+        RobotRequest req = new RobotRequest();
+        req.id = 1;
+        req.startNodeId = "L1";
+        req.endNodeId = "U1";
+        req.speedCmPerSec = 40.0;
+        req.accelerationCmPerSec2 = 20.0;
+        req.decelerationCmPerSec2 = 20.0;
+
+        List<RobotResponse> responses = plannerService.planRoutes("instructions-key", Collections.singletonList(req));
+        assertNotNull(responses);
+        assertEquals(1, responses.size());
+
+        RobotResponse resp = responses.get(0);
+        assertEquals(40.0, resp.speedCmPerSec);
+        assertEquals(20.0, resp.accelerationCmPerSec2);
+        assertEquals(20.0, resp.decelerationCmPerSec2);
+
+        List<RobotInstruction> instructions = resp.instructions;
+        assertNotNull(instructions);
+        assertEquals(6, instructions.size());
+
+        // 1. FORWARD distance: 120 cm
+        assertEquals("FORWARD", instructions.get(0).command);
+        assertEquals(120.0, instructions.get(0).distanceCm, 0.01);
+        assertEquals(0.0, instructions.get(0).angleDegrees, 0.01);
+        assertEquals(40.0, instructions.get(0).speedCmPerSec);
+
+        // 2. LEFT 90° distance: 0 cm
+        assertEquals("LEFT", instructions.get(1).command);
+        assertEquals(90.0, instructions.get(1).angleDegrees, 0.01);
+        assertEquals(0.0, instructions.get(1).distanceCm, 0.01);
+
+        // 3. FORWARD distance: 80 cm
+        assertEquals("FORWARD", instructions.get(2).command);
+        assertEquals(80.0, instructions.get(2).distanceCm, 0.01);
+        assertEquals(0.0, instructions.get(2).angleDegrees, 0.01);
+
+        // 4. RIGHT 90° distance: 0 cm
+        assertEquals("RIGHT", instructions.get(3).command);
+        assertEquals(90.0, instructions.get(3).angleDegrees, 0.01);
+        assertEquals(0.0, instructions.get(3).distanceCm, 0.01);
+
+        // 5. FORWARD distance: 80 cm
+        assertEquals("FORWARD", instructions.get(4).command);
+        assertEquals(80.0, instructions.get(4).distanceCm, 0.01);
+        assertEquals(0.0, instructions.get(4).angleDegrees, 0.01);
+
+        // 6. STOP distance: 0 cm
+        assertEquals("STOP", instructions.get(5).command);
+        assertEquals(0.0, instructions.get(5).distanceCm, 0.01);
+        assertEquals(0.0, instructions.get(5).angleDegrees, 0.01);
+        assertEquals(0.0, instructions.get(5).speedCmPerSec);
     }
 }

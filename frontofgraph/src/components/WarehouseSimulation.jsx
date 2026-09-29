@@ -11,10 +11,124 @@ import {
     Save,
     Terminal,
     Trash2,
-    Sparkles
+    Sparkles,
+    Gauge,
+    Zap
 } from "lucide-react";
 import SchematicSimulation from "./SchematicSimulation";
 
+/**
+ * Kinematics calculation for trapezoidal/triangular motion:
+ * - distance: distance to travel (cm)
+ * - targetSpeed: maximum cruise speed (cm/s)
+ * - accelTimeSec: time to accelerate from 0 to targetSpeed (s)
+ * - decelTimeSec: time to decelerate from targetSpeed to 0 (s)
+ * - elapsed: time elapsed since motion began (s)
+ *
+ * Returns:
+ * {
+ *   progress: number between 0 and 1,
+ *   currentSpeed: instantaneous speed in cm/s,
+ *   currentAccel: instantaneous acceleration in cm/s²,
+ *   motionPhase: "ACCELERATING" | "CRUISING" | "DECELERATING" | "STOPPED" | "TURNING",
+ *   totalTime: total time to traverse distance (s),
+ *   peakSpeed: max speed reached (cm/s),
+ *   accelRate: acceleration rate (cm/s²),
+ *   decelRate: deceleration rate (cm/s²)
+ * }
+ */
+export function calculateKinematics(distance, targetSpeed, accelTimeSec = 1.0, decelTimeSec = 1.0, elapsed = 0) {
+    if (distance <= 0 || targetSpeed <= 0) {
+        return {
+            progress: 1,
+            currentSpeed: 0,
+            currentAccel: 0,
+            motionPhase: "STOPPED",
+            totalTime: 0,
+            peakSpeed: 0,
+            accelRate: 0,
+            decelRate: 0
+        };
+    }
+
+    const ta = Math.max(0.01, Number(accelTimeSec) || 0.01);
+    const td = Math.max(0.01, Number(decelTimeSec) || 0.01);
+    const a = targetSpeed / ta; // cm/s²
+    const d = targetSpeed / td; // cm/s²
+
+    const dCrit = 0.5 * targetSpeed * (ta + td);
+
+    let totalTime;
+    let tAcc;
+    let tCruise;
+    let tDec;
+    let peakSpeed;
+
+    if (distance >= dCrit) {
+        // Trapezoidal velocity profile
+        peakSpeed = targetSpeed;
+        tAcc = ta;
+        const dCruise = distance - dCrit;
+        tCruise = dCruise / targetSpeed;
+        tDec = td;
+        totalTime = tAcc + tCruise + tDec;
+    } else {
+        // Triangular velocity profile
+        peakSpeed = Math.sqrt((2.0 * distance * targetSpeed) / (ta + td));
+        tAcc = ta * (peakSpeed / targetSpeed);
+        tCruise = 0;
+        tDec = td * (peakSpeed / targetSpeed);
+        totalTime = tAcc + tDec;
+    }
+
+    const tau = Math.max(0, Math.min(elapsed, totalTime));
+    let distCovered = 0;
+    let currentSpeed = 0;
+    let currentAccel = 0;
+    let motionPhase = "STOPPED";
+
+    if (tau <= 0) {
+        distCovered = 0;
+        currentSpeed = 0;
+        currentAccel = a;
+        motionPhase = "STOPPED";
+    } else if (tau < tAcc) {
+        motionPhase = "ACCELERATING";
+        currentAccel = a;
+        currentSpeed = a * tau;
+        distCovered = 0.5 * a * tau * tau;
+    } else if (tau < tAcc + tCruise) {
+        motionPhase = "CRUISING";
+        currentAccel = 0;
+        currentSpeed = peakSpeed;
+        const distAcc = 0.5 * a * tAcc * tAcc;
+        distCovered = distAcc + peakSpeed * (tau - tAcc);
+    } else if (tau < totalTime) {
+        motionPhase = "DECELERATING";
+        currentAccel = -d;
+        const remTime = totalTime - tau;
+        currentSpeed = d * remTime;
+        distCovered = distance - 0.5 * d * remTime * remTime;
+    } else {
+        motionPhase = "STOPPED";
+        currentSpeed = 0;
+        currentAccel = 0;
+        distCovered = distance;
+    }
+
+    const progress = Math.min(1, Math.max(0, distCovered / distance));
+
+    return {
+        progress,
+        currentSpeed: Math.max(0, currentSpeed),
+        currentAccel,
+        motionPhase,
+        totalTime,
+        peakSpeed,
+        accelRate: a,
+        decelRate: d
+    };
+}
 
 // Generates connection and weight matrices for database representation
 const generateMatrices = (nodesList, edgesList) => {
@@ -144,22 +258,28 @@ const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
         const startLabel = nodes.find(n => n.id === req.startNodeId)?.label || req.startNodeId;
         const endLabel = nodes.find(n => n.id === req.endNodeId)?.label || req.endNodeId;
         
-        // Calculate path distance
+        // Calculate path distance and kinematic free-run time
         let pathDist = 0;
+        let freeRunTime = 0;
         for (let i = 0; i < p.path.length - 1; i++) {
             const u = p.path[i];
             const v = p.path[i+1];
             const edge = edges.find(e => (e.from === u && e.to === v) || (e.from === v && e.to === u));
-            pathDist += edge?.distance || 10.0;
+            const dist = edge?.distance || 10.0;
+            pathDist += dist;
+            freeRunTime += calculateKinematics(dist, req.speedCmPerSec || 50, req.accelTimeSec || 1.0, req.decelTimeSec || 1.0).totalTime;
         }
 
-        const freeRunTime = req.speedCmPerSec > 0 ? pathDist / req.speedCmPerSec : 0;
+        const ta = req.accelTimeSec !== undefined ? req.accelTimeSec : 1.0;
+        const td = req.decelTimeSec !== undefined ? req.decelTimeSec : 1.0;
+        const aRate = ((req.speedCmPerSec || 50) / ta).toFixed(1);
+        const dRate = ((req.speedCmPerSec || 50) / td).toFixed(1);
 
         logs.push({
             id: `plan-r-${p.id}`,
             time: -0.03,
             type: "planner",
-            text: `Robot ${p.id + 1} (${startLabel} ➔ ${endLabel}): Route found! Path = [${p.path.map(nid => nodes.find(n => n.id === nid)?.label || nid).join(" ➔ ")}]. Dist = ${pathDist.toFixed(1)}cm. Speed = ${req.speedCmPerSec}cm/s. Free run time = ${freeRunTime.toFixed(2)}s.`
+            text: `Robot ${p.id + 1} (${startLabel} ➔ ${endLabel}): Route found! Path = [${p.path.map(nid => nodes.find(n => n.id === nid)?.label || nid).join(" ➔ ")}]. Dist = ${pathDist.toFixed(1)}cm. Target Speed = ${req.speedCmPerSec}cm/s (Accel: ${ta}s [${aRate}cm/s²], Decel: ${td}s [${dRate}cm/s²]). Kinematic free run time = ${freeRunTime.toFixed(2)}s.`
         });
     });
 
@@ -167,7 +287,7 @@ const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
         id: `sched-init`,
         time: -0.02,
         type: "system",
-        text: `Analyzing temporal conflicts (safety margin = 0.50s)...`
+        text: `Analyzing temporal conflicts & kinematic profiles (safety margin = 0.50s)...`
     });
 
     // 3. Find conflict delays by analyzing wait times and applying 3/4th Advance Equation
@@ -178,7 +298,9 @@ const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
             const u = p.scheduleNodes[k-1];
             const v = p.scheduleNodes[k];
             const edge = edges.find(e => (e.from === u && e.to === v) || (e.from === v && e.to === u));
-            const travelTime = (edge?.distance || 10.0) / (req.speedCmPerSec || 50);
+            const dist = edge?.distance || 10.0;
+            const kin = calculateKinematics(dist, req.speedCmPerSec || 50, req.accelTimeSec || 1.0, req.decelTimeSec || 1.0);
+            const travelTime = kin.totalTime;
             
             const arrPrev = p.scheduleTimes[k-1];
             const arrNext = p.scheduleTimes[k];
@@ -187,31 +309,31 @@ const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
             if (waitTime > 0.01) {
                 const nodeLabel = nodes.find(n => n.id === u)?.label || u;
                 const nextLabel = nodes.find(n => n.id === v)?.label || v;
-                const dist = edge?.distance || 10.0;
                 const speed = req.speedCmPerSec || 50;
-                const weight = dist / speed;
                 const advanceDist = dist * 0.75;
                 const remDist = dist * 0.25;
-                const newWeight = remDist / speed;
+                const kinRem = calculateKinematics(remDist, speed, req.accelTimeSec || 1.0, req.decelTimeSec || 1.0);
 
                 logs.push({
                     id: `delay-r-${p.id}-${k}`,
                     time: -0.01,
                     type: "scheduler",
-                    text: `Robot ${p.id + 1}: Traffic conflict detected approaching ${nextLabel}. Executing 3/4th Advance Equation: W = ${weight.toFixed(2)}s, advance x = (W * 3/4 * v) = ${advanceDist.toFixed(1)}cm. Safe standoff buffer = ${remDist.toFixed(1)}cm (New W' = ${newWeight.toFixed(2)}s).`
+                    text: `Robot ${p.id + 1}: Traffic conflict detected approaching ${nextLabel}. Executing 3/4th Advance Kinematics: Edge Dist = ${dist.toFixed(1)}cm, Advance = ${advanceDist.toFixed(1)}cm (75%), Standoff Buffer = ${remDist.toFixed(1)}cm (Remaining Transit = ${kinRem.totalTime.toFixed(2)}s).`
                 });
             }
         }
 
         const totalTime = p.scheduleTimes[p.scheduleTimes.length - 1];
         let pathDist = 0;
+        let freeRunTime = 0;
         for (let i = 0; i < p.path.length - 1; i++) {
             const u = p.path[i];
             const v = p.path[i+1];
             const edge = edges.find(e => (e.from === u && e.to === v) || (e.from === v && e.to === u));
-            pathDist += edge?.distance || 10.0;
+            const dist = edge?.distance || 10.0;
+            pathDist += dist;
+            freeRunTime += calculateKinematics(dist, req.speedCmPerSec || 50, req.accelTimeSec || 1.0, req.decelTimeSec || 1.0).totalTime;
         }
-        const freeRunTime = req.speedCmPerSec > 0 ? pathDist / req.speedCmPerSec : 0;
         const totalWait = totalTime - freeRunTime;
 
         if (totalWait > 0.01) {
@@ -275,7 +397,9 @@ const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
             const arrTime = p.scheduleTimes[k];
             const prevArrTime = p.scheduleTimes[k-1];
             const edge = edges.find(e => (e.from === u && e.to === v) || (e.from === v && e.to === u));
-            const travelTime = (edge?.distance || 10.0) / (req.speedCmPerSec || 50);
+            const dist = edge?.distance || 10.0;
+            const kinSeg = calculateKinematics(dist, req.speedCmPerSec || 50, req.accelTimeSec || 1.0, req.decelTimeSec || 1.0, 0);
+            const travelTime = kinSeg.totalTime;
             const depTime = arrTime - travelTime;
 
             // Check if turning at node u
@@ -304,16 +428,18 @@ const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
                 }
             }
 
-            const waitDelay = arrTime - prevArrTime - travelTime;
+            const waitDelay = arrTime - prevArrTime - (turnDuration + travelTime);
             if (waitDelay > 0.05) {
-                const dist = edge?.distance || 10.0;
                 const speed = req.speedCmPerSec || 50;
                 const advanceDist = dist * 0.75;
                 const remDist = dist * 0.25;
-                const newWeight = remDist / speed;
-                const t34TravelTime = 0.75 * travelTime;
+                const kin34 = calculateKinematics(advanceDist, speed, req.accelTimeSec || 1.0, req.decelTimeSec || 1.0, 0);
+                const kin25 = calculateKinematics(remDist, speed, req.accelTimeSec || 1.0, req.decelTimeSec || 1.0, 0);
+                const t34TravelTime = kin34.totalTime;
+                const tFinalTravelTime = kin25.totalTime;
+                const newWeight = tFinalTravelTime;
                 const standoffArrival = prevArrTime + turnDuration + t34TravelTime;
-                const finalDepart = Math.max(standoffArrival, arrTime - 0.25 * travelTime);
+                const finalDepart = Math.max(standoffArrival, arrTime - tFinalTravelTime);
 
                 if (hasTurn) {
                     logs.push({
@@ -492,14 +618,18 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     if (existing) {
                         updatedRobots.push({
                             ...existing,
-                            speedCmPerSec: existing.speedCmPerSec || 50
+                            speedCmPerSec: existing.speedCmPerSec || 50,
+                            accelTimeSec: existing.accelTimeSec !== undefined ? Number(existing.accelTimeSec) : 1.0,
+                            decelTimeSec: existing.decelTimeSec !== undefined ? Number(existing.decelTimeSec) : 1.0
                         });
                     } else {
                         updatedRobots.push({
                             id: i,
                             startNodeId: loadingNodes[i % loadingNodes.length]?.id || "",
                             endNodeId: unloadingNodes[i % unloadingNodes.length]?.id || "",
-                            speedCmPerSec: 50
+                            speedCmPerSec: 50,
+                            accelTimeSec: 1.0,
+                            decelTimeSec: 1.0
                         });
                     }
                 }
@@ -542,7 +672,9 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     id: i,
                     startNodeId: startNode.id,
                     endNodeId: endNode.id,
-                    speedCmPerSec: route.speedCmPerSec || 50
+                    speedCmPerSec: route.speedCmPerSec || 50,
+                    accelTimeSec: route.accelTimeSec !== undefined ? Number(route.accelTimeSec) : 1.0,
+                    decelTimeSec: route.decelTimeSec !== undefined ? Number(route.decelTimeSec) : 1.0
                 });
             }
 
@@ -589,6 +721,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                 }
 
                 const newVehicles = plans.map(p => {
+                    const req = robotRequests.find(r => r.id === p.id) || {};
                     const startNode = nodes.find(n => n.id === p.scheduleNodes[0]);
                     return {
                         id: `v-${p.id}-${Date.now()}`,
@@ -596,7 +729,12 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         path: p.path,
                         scheduleNodes: p.scheduleNodes,
                         scheduleTimes: p.scheduleTimes,
-                        speedCmPerSec: robotRequests.find(r => r.id === p.id)?.speedCmPerSec || 50,
+                        speedCmPerSec: req.speedCmPerSec || 50,
+                        accelTimeSec: req.accelTimeSec !== undefined ? req.accelTimeSec : 1.0,
+                        decelTimeSec: req.decelTimeSec !== undefined ? req.decelTimeSec : 1.0,
+                        currentSpeed: 0,
+                        currentAccel: 0,
+                        motionPhase: "STOPPED",
                         color: `hsl(${200 + p.id * 40}, 90%, 60%)`,
                         x: startNode ? startNode.x : 0,
                         y: startNode ? startNode.y : 0
@@ -656,13 +794,16 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             ...veh,
                             x: endNode ? endNode.x : veh.x,
                             y: endNode ? endNode.y : veh.y,
-                            status: "DESTINATION REACHED"
+                            status: "DESTINATION REACHED",
+                            currentSpeed: 0,
+                            currentAccel: 0,
+                            motionPhase: "STOPPED"
                         };
                     });
                 }
 
                 const updated = prevVehicles.map((veh, i) => {
-                    const { scheduleNodes, scheduleTimes, speedCmPerSec = 50 } = veh;
+                    const { scheduleNodes, scheduleTimes, speedCmPerSec = 50, accelTimeSec = 1.0, decelTimeSec = 1.0 } = veh;
                     if (!scheduleNodes || scheduleNodes.length === 0) return veh;
 
                     const finalTime = scheduleTimes[scheduleTimes.length - 1];
@@ -673,7 +814,28 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             ...veh,
                             x: endNode ? endNode.x : veh.x,
                             y: endNode ? endNode.y : veh.y,
-                            status: "DESTINATION REACHED"
+                            status: "DESTINATION REACHED",
+                            currentSpeed: 0,
+                            currentAccel: 0,
+                            motionPhase: "STOPPED"
+                        };
+                    }
+
+                    // If robot hasn't reached its scheduled departure at start node, keep it staged
+                    if (scheduleTimes.length > 0 && t < scheduleTimes[0]) {
+                        const startNode = nodes.find(n => n.id === scheduleNodes[0]);
+                        return {
+                            ...veh,
+                            x: startNode ? startNode.x : veh.x,
+                            y: startNode ? startNode.y : veh.y,
+                            status: "WAITING AT START NODE",
+                            turnStatus: `Staged at ${startNode?.label || scheduleNodes[0]} (Departs at ${scheduleTimes[0].toFixed(2)}s)`,
+                            currentSpeed: 0,
+                            currentAccel: 0,
+                            motionPhase: "STOPPED",
+                            fromNodeLabel: startNode?.label || scheduleNodes[0],
+                            toNodeLabel: scheduleNodes.length > 1 ? (nodes.find(n => n.id === scheduleNodes[1])?.label || scheduleNodes[1]) : "",
+                            segmentDistance: 0
                         };
                     }
 
@@ -695,32 +857,18 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         return veh;
                     }
 
-                    // Look up edge distance
+                    // Look up edge distance and kinematic transit time
                     const currentEdge = edges.find(e =>
                         (e.from === fromNodeId && e.to === toNodeId) ||
                         (e.from === toNodeId && e.to === fromNodeId)
                     );
                     const distance = currentEdge?.distance || 10.0;
-                    const travelTime = distance / speedCmPerSec;
+                    const kinSeg = calculateKinematics(distance, speedCmPerSec, accelTimeSec, decelTimeSec, 0);
+                    const travelTime = kinSeg.totalTime;
                     const tArrivalFrom = scheduleTimes[k];
                     const tArrivalTo = scheduleTimes[k + 1];
-                    let tDepart = tArrivalTo - travelTime;
-
-                    // Bulletproof clamp against skipping or jumping
-                    if (tDepart < tArrivalFrom) {
-                        tDepart = tArrivalFrom;
-                    }
-                    const effectiveTravelTime = Math.max(0.001, tArrivalTo - tDepart);
-
-                    let x = fromNode.x;
-                    let y = fromNode.y;
-                    let heading = 0;
-                    let turningAngle = 0;
-                    let turnStatus = "Straight (0°)";
-                    let status = "MOVING";
 
                     const segHeading = getSegmentHeading(fromNode, toNode);
-
                     let prevHeading = segHeading;
                     if (k > 0) {
                         const prevNode = nodes.find(n => n.id === scheduleNodes[k - 1]);
@@ -734,35 +882,59 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     const hasTurn = Math.abs(angleDiff) > 5;
 
                     // Real-time tire turning at the node itself
-                    const maxTurnTime = effectiveTravelTime * 0.40;
+                    const maxTurnTime = travelTime * 0.40;
                     const desiredTurnTime = 0.6 + (Math.abs(angleDiff) / 180) * 1.2;
                     const turnDuration = hasTurn ? Math.min(desiredTurnTime, maxTurnTime) : 0;
-                    const moveDuration = Math.max(0.001, effectiveTravelTime - turnDuration);
                     const dir = angleDiff > 0 ? "Counter-Clockwise (Left)" : "Clockwise (Right)";
 
-                    const waitDelay = tArrivalTo - tArrivalFrom - travelTime;
+                    const minStepTime = turnDuration + travelTime;
+                    const waitDelay = (tArrivalTo - tArrivalFrom) - minStepTime;
                     const isWaitDelayed = waitDelay > 0.05;
 
+                    let x = fromNode.x;
+                    let y = fromNode.y;
+                    let heading = segHeading;
+                    let turningAngle = 0;
+                    let turnStatus = "Straight (0°)";
+                    let status = "MOVING";
+                    let currentSpeed = 0;
+                    let currentAccel = 0;
+                    let motionPhase = "STOPPED";
+
                     if (!isWaitDelayed) {
-                        // Uninterrupted normal transit
-                        if (hasTurn && t < tDepart + turnDuration) {
+                        // Uninterrupted normal transit: turn wheels first (if turn needed), then traverse edge
+                        const tTurnEnd = tArrivalFrom + turnDuration;
+                        if (hasTurn && t < tTurnEnd) {
                             x = fromNode.x;
                             y = fromNode.y;
-                            const turnProgress = Math.min(1, Math.max(0, (t - tDepart) / Math.max(0.001, turnDuration)));
+                            const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, turnDuration)));
                             const turnEase = 0.5 - 0.5 * Math.cos(turnProgress * Math.PI);
                             heading = Math.round((prevHeading + angleDiff * turnEase + 360) % 360);
                             turningAngle = Math.abs(Math.round(angleDiff * (1 - turnProgress)));
                             status = fromNode.type === "intersection" ? "TURNING AT INTERSECTION" : "TURNING AT NODE";
                             turnStatus = `Turning ${Math.abs(Math.round(angleDiff))}° ${dir} (Tires Steering)`;
+                            currentSpeed = 0;
+                            currentAccel = 0;
+                            motionPhase = "TURNING";
                         } else {
-                            const moveElapsed = t - (tDepart + turnDuration);
-                            const progress = Math.min(1, Math.max(0, moveElapsed / moveDuration));
+                            const moveDuration = Math.max(0.001, tArrivalTo - tTurnEnd);
+                            const moveElapsed = Math.max(0, t - tTurnEnd);
+                            const effectiveElapsed = Math.min(kinSeg.totalTime, moveElapsed * (kinSeg.totalTime / moveDuration));
+                            const kin = calculateKinematics(distance, speedCmPerSec, accelTimeSec, decelTimeSec, effectiveElapsed);
+                            const progress = Math.min(1, Math.max(0, kin.progress));
                             x = fromNode.x + (toNode.x - fromNode.x) * progress;
                             y = fromNode.y + (toNode.y - fromNode.y) * progress;
                             heading = segHeading;
                             turningAngle = 0;
-                            turnStatus = hasTurn ? `Turn Completed (${segHeading}°)` : "Straight (0°)";
+                            currentSpeed = kin.currentSpeed * (kinSeg.totalTime / moveDuration);
+                            currentAccel = kin.currentAccel;
+                            motionPhase = kin.motionPhase;
                             status = "MOVING";
+                            turnStatus = kin.motionPhase === "CRUISING"
+                                ? `Cruising at ${currentSpeed.toFixed(1)} cm/s`
+                                : (kin.motionPhase === "ACCELERATING"
+                                    ? `Accelerating (+${kin.currentAccel.toFixed(1)} cm/s²)`
+                                    : `Decelerating (${kin.currentAccel.toFixed(1)} cm/s²)`);
                         }
                     } else {
                         // Check if this particular edge is scheduled/occupied by any other vehicle
@@ -794,23 +966,29 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             if (isEdgeOccupied) break;
                         }
 
-                        const fixedTurnDuration = hasTurn ? Math.min(desiredTurnTime, 0.8) : 0;
-                        const tTurnEnd = tArrivalFrom + fixedTurnDuration;
-                        const t34TravelTime = 0.75 * travelTime;
-                        const tStandoffArrival = tTurnEnd + t34TravelTime;
-                        const tFinalTravelTime = 0.25 * travelTime;
+                        const kin34 = calculateKinematics(0.75 * distance, speedCmPerSec, accelTimeSec, decelTimeSec, 0);
+                        const kin25 = calculateKinematics(0.25 * distance, speedCmPerSec, accelTimeSec, decelTimeSec, 0);
+                        const tTurnEnd = tArrivalFrom + turnDuration;
+                        const tStandoffArrival = tTurnEnd + kin34.totalTime;
+                        const tFinalTravelTime = kin25.totalTime;
                         const tFinalDepart = Math.max(tStandoffArrival, tArrivalTo - tFinalTravelTime);
+                        const minStandoffRequired = turnDuration + kin34.totalTime + tFinalTravelTime;
                         const canAdvance34 = !isEdgeOccupied && 
                                              tFinalDepart >= tStandoffArrival && 
-                                             (tArrivalTo - tArrivalFrom) >= (fixedTurnDuration + travelTime + 0.1);
+                                             (tArrivalTo - tArrivalFrom) >= (minStandoffRequired + 0.05);
+
+                        let tDepart = tArrivalTo - travelTime;
+                        if (tDepart < tTurnEnd) {
+                            tDepart = tTurnEnd;
+                        }
 
                         if (isEdgeOccupied || !canAdvance34) {
-                            // Edge is occupied by another vehicle: robot stops itself at origin node until departure
+                            // Edge is occupied: robot stops itself at origin node until departure
                             if (t < tDepart) {
                                 x = fromNode.x;
                                 y = fromNode.y;
                                 if (hasTurn) {
-                                    const steerDuration = Math.min(desiredTurnTime, 0.8);
+                                    const steerDuration = Math.min(turnDuration > 0 ? turnDuration : 0.8, 0.8);
                                     const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, steerDuration)));
                                     const turnEase = 0.5 - 0.5 * Math.cos(turnProgress * Math.PI);
                                     heading = Math.round((prevHeading + angleDiff * turnEase + 360) % 360);
@@ -823,16 +1001,25 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 turnStatus = isEdgeOccupied 
                                     ? "Holding at Node - Edge Occupied by another vehicle" 
                                     : "Holding at Node - Waiting for Departure";
+                                currentSpeed = 0;
+                                currentAccel = 0;
+                                motionPhase = "STOPPED";
                             } else {
                                 // Departure time arrived: smoothly move from fromNode to toNode
-                                const moveElapsed = t - tDepart;
-                                const progress = Math.min(1, Math.max(0, moveElapsed / Math.max(0.001, travelTime)));
+                                const moveDuration = Math.max(0.001, tArrivalTo - tDepart);
+                                const moveElapsed = Math.max(0, t - tDepart);
+                                const effectiveElapsed = Math.min(kinSeg.totalTime, moveElapsed * (kinSeg.totalTime / moveDuration));
+                                const kin = calculateKinematics(distance, speedCmPerSec, accelTimeSec, decelTimeSec, effectiveElapsed);
+                                const progress = Math.min(1, Math.max(0, kin.progress));
                                 x = fromNode.x + (toNode.x - fromNode.x) * progress;
                                 y = fromNode.y + (toNode.y - fromNode.y) * progress;
                                 heading = segHeading;
                                 turningAngle = 0;
+                                currentSpeed = kin.currentSpeed * (kinSeg.totalTime / moveDuration);
+                                currentAccel = kin.currentAccel;
+                                motionPhase = kin.motionPhase;
                                 status = "MOVING";
-                                turnStatus = `Moving to Destination (${(progress * 100).toFixed(0)}%)`;
+                                turnStatus = `Moving to Destination (${currentSpeed.toFixed(1)} cm/s)`;
                             }
                         } else {
                             // Edge is VACANT: Advance 3/4 (75%) distance and hold at standoff buffer
@@ -840,43 +1027,58 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 // Phase 1: Steer tires at fromNode towards segHeading
                                 x = fromNode.x;
                                 y = fromNode.y;
-                                const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, fixedTurnDuration)));
+                                const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, turnDuration)));
                                 const turnEase = 0.5 - 0.5 * Math.cos(turnProgress * Math.PI);
                                 heading = Math.round((prevHeading + angleDiff * turnEase + 360) % 360);
                                 turningAngle = Math.abs(Math.round(angleDiff * (1 - turnProgress)));
                                 status = fromNode.type === "intersection" ? "TURNING AT INTERSECTION" : "TURNING AT NODE";
                                 turnStatus = `Steering ${Math.abs(Math.round(angleDiff))}° ${dir} Before 3/4 Advance`;
+                                currentSpeed = 0;
+                                currentAccel = 0;
+                                motionPhase = "TURNING";
                             } else if (t < tStandoffArrival) {
                                 // Phase 2: Actively moving 3/4 (75%) of the distance towards toNode
-                                const advanceElapsed = t - tTurnEnd;
-                                const advanceProgress = Math.min(1, Math.max(0, advanceElapsed / Math.max(0.001, t34TravelTime)));
-                                const progress = 0.75 * advanceProgress;
+                                const advDuration = Math.max(0.001, tStandoffArrival - tTurnEnd);
+                                const advanceElapsed = Math.max(0, t - tTurnEnd);
+                                const effectiveElapsed = Math.min(kin34.totalTime, advanceElapsed * (kin34.totalTime / advDuration));
+                                const kin = calculateKinematics(0.75 * distance, speedCmPerSec, accelTimeSec, decelTimeSec, effectiveElapsed);
+                                const progress = 0.75 * Math.min(1, Math.max(0, kin.progress));
                                 x = fromNode.x + (toNode.x - fromNode.x) * progress;
                                 y = fromNode.y + (toNode.y - fromNode.y) * progress;
                                 heading = segHeading;
                                 turningAngle = 0;
+                                currentSpeed = kin.currentSpeed * (kin34.totalTime / advDuration);
+                                currentAccel = kin.currentAccel;
+                                motionPhase = kin.motionPhase;
                                 status = "MOVING (3/4 ADVANCE)";
-                                turnStatus = `Advancing 75% Distance (${(advanceProgress * 75).toFixed(0)}%)`;
+                                turnStatus = `Advancing 75% Distance (${currentSpeed.toFixed(1)} cm/s)`;
                             } else if (t < tFinalDepart) {
                                 // Phase 3: Holding at 75% standoff point (safe buffer before intersection)
                                 x = fromNode.x + (toNode.x - fromNode.x) * 0.75;
                                 y = fromNode.y + (toNode.y - fromNode.y) * 0.75;
                                 heading = segHeading;
                                 turningAngle = 0;
+                                currentSpeed = 0;
+                                currentAccel = 0;
+                                motionPhase = "STOPPED";
                                 status = "WAITING AT 3/4 STANDOFF";
                                 turnStatus = "Holding 75% Standoff Buffer (Edge Vacant)";
                             } else {
                                 // Phase 4: Final approach - covering remaining 25% distance into toNode
-                                const finalElapsed = t - tFinalDepart;
                                 const finalDuration = Math.max(0.001, tArrivalTo - tFinalDepart);
-                                const finalProgress = Math.min(1, Math.max(0, finalElapsed / finalDuration));
-                                const progress = 0.75 + 0.25 * finalProgress;
+                                const finalElapsed = Math.max(0, t - tFinalDepart);
+                                const effectiveElapsed = Math.min(kin25.totalTime, finalElapsed * (kin25.totalTime / finalDuration));
+                                const kin = calculateKinematics(0.25 * distance, speedCmPerSec, accelTimeSec, decelTimeSec, effectiveElapsed);
+                                const progress = 0.75 + 0.25 * Math.min(1, Math.max(0, kin.progress));
                                 x = fromNode.x + (toNode.x - fromNode.x) * progress;
                                 y = fromNode.y + (toNode.y - fromNode.y) * progress;
                                 heading = segHeading;
                                 turningAngle = 0;
+                                currentSpeed = kin.currentSpeed * (kin25.totalTime / finalDuration);
+                                currentAccel = kin.currentAccel;
+                                motionPhase = kin.motionPhase;
                                 status = "FINAL APPROACH (LAST 25%)";
-                                turnStatus = "Entering Intersection";
+                                turnStatus = `Entering Intersection (${currentSpeed.toFixed(1)} cm/s)`;
                             }
                         }
                     }
@@ -889,6 +1091,9 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         turningAngle,
                         turnStatus,
                         status,
+                        currentSpeed: Math.round(currentSpeed * 10) / 10,
+                        currentAccel: Math.round(currentAccel * 10) / 10,
+                        motionPhase,
                         fromNodeLabel: fromNode.label || fromNode.id,
                         toNodeLabel: toNode.label || toNode.id,
                         segmentDistance: distance
@@ -1222,7 +1427,12 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                     </div>
                                 </div>
                                 <div style={{ display: "flex", flexDirection: "column", gap: "4px", marginTop: "4px" }}>
-                                    <span style={{ fontSize: "10px", color: "#9CA3AF" }}>Robot Speed (cm/sec)</span>
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                        <span style={{ fontSize: "10px", color: "#9CA3AF" }}>Target Speed (cm/sec)</span>
+                                        <span style={{ fontSize: "10px", fontWeight: "700", color: "#10B981" }}>
+                                            {route.speedCmPerSec || 50} cm/s
+                                        </span>
+                                    </div>
                                     <input
                                         type="number"
                                         min="1"
@@ -1240,6 +1450,63 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                             width: "100%"
                                         }}
                                     />
+                                </div>
+
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginTop: "4px" }}>
+                                    <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+                                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                            <span style={{ fontSize: "10px", color: "#9CA3AF" }}>Accel Time (s)</span>
+                                            <span style={{ fontSize: "9px", color: "#60A5FA", fontWeight: 700 }}>
+                                                {((route.speedCmPerSec || 50) / (route.accelTimeSec || 1.0)).toFixed(1)} cm/s²
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="number"
+                                            min="0.1"
+                                            max="30"
+                                            step="0.1"
+                                            value={route.accelTimeSec !== undefined ? route.accelTimeSec : 1.0}
+                                            onChange={(e) => handleRouteChange(route.id, "accelTimeSec", parseFloat(e.target.value) || 0.1)}
+                                            style={{
+                                                background: "#070707",
+                                                border: "1px solid rgba(255, 255, 255, 0.1)",
+                                                borderRadius: "8px",
+                                                padding: "6px",
+                                                color: "#FFFFFF",
+                                                fontSize: "12px",
+                                                outline: "none",
+                                                width: "100%"
+                                            }}
+                                            title="Time in seconds to accelerate from 0 to target speed"
+                                        />
+                                    </div>
+                                    <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
+                                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                            <span style={{ fontSize: "10px", color: "#9CA3AF" }}>Decel Time (s)</span>
+                                            <span style={{ fontSize: "9px", color: "#F59E0B", fontWeight: 700 }}>
+                                                {((route.speedCmPerSec || 50) / (route.decelTimeSec || 1.0)).toFixed(1)} cm/s²
+                                            </span>
+                                        </div>
+                                        <input
+                                            type="number"
+                                            min="0.1"
+                                            max="30"
+                                            step="0.1"
+                                            value={route.decelTimeSec !== undefined ? route.decelTimeSec : 1.0}
+                                            onChange={(e) => handleRouteChange(route.id, "decelTimeSec", parseFloat(e.target.value) || 0.1)}
+                                            style={{
+                                                background: "#070707",
+                                                border: "1px solid rgba(255, 255, 255, 0.1)",
+                                                borderRadius: "8px",
+                                                padding: "6px",
+                                                color: "#FFFFFF",
+                                                fontSize: "12px",
+                                                outline: "none",
+                                                width: "100%"
+                                            }}
+                                            title="Time in seconds to decelerate from target speed to 0"
+                                        />
+                                    </div>
                                 </div>
                             </div>
                         ))}
@@ -1665,6 +1932,31 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                             </text>
                                         </g>
                                     )}
+                                    {/* Live Speed Badge */}
+                                    <g transform={`translate(${vehicle.x}, ${vehicle.y + 13})`}>
+                                        <rect
+                                            x="-23"
+                                            y="-6"
+                                            width="46"
+                                            height="12"
+                                            rx="3"
+                                            fill="#0A0A0A"
+                                            stroke={vehicle.motionPhase === "CRUISING" ? "#3B82F6" : (vehicle.motionPhase === "ACCELERATING" ? "#10B981" : (vehicle.motionPhase === "DECELERATING" ? "#F59E0B" : "rgba(255,255,255,0.2)"))}
+                                            strokeWidth="0.8"
+                                            opacity="0.92"
+                                        />
+                                        <text
+                                            x="0"
+                                            y="2.5"
+                                            textAnchor="middle"
+                                            fontSize="7.5px"
+                                            fontWeight="700"
+                                            fill={vehicle.currentSpeed > 0 ? "#10B981" : "#9CA3AF"}
+                                            fontFamily="monospace"
+                                        >
+                                            {(vehicle.currentSpeed || 0).toFixed(1)} cm/s
+                                        </text>
+                                    </g>
                                 </g>
                             ))}
                         </g>
