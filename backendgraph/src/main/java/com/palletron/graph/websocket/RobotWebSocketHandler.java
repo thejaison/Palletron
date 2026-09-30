@@ -25,11 +25,11 @@ public class RobotWebSocketHandler extends TextWebSocketHandler {
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws IOException {
         JsonNode json = mapper.readTree(message.getPayload());
-        String type = json.path("type").asText();
+        String type = json.path("type").asString();
 
         switch (type) {
             case "hello" -> {                       // ESP32 registers itself
-                String id = json.path("robotId").asText();
+                String id = json.path("robotId").asString();
                 session.getAttributes().put("robotId", id);
                 robots.put(id, session);
                 log.info("Robot connected: {}", id);

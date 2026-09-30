@@ -318,98 +318,85 @@ public class RobotPathPlannerService {
                 double tStart = Math.max(t, t_min[idx] - stepDuration);
                 double tEnd = tStart + stepDuration;
 
+                String eKey = edgeKey(pos, next);
+
+                // Compute time required for robot to change direction (turn) at 'next'
+                // and clear 50 cm away from 'next' along its subsequent segment
+                double nextTurnDuration = 0.0;
+                double tClear50 = 0.0;
+                if (idx < r.path.size() - 1) {
+                    int nextNext = r.path.get(idx + 1);
+                    double nextDist = weights[next][nextNext];
+                    double nextTravelTime = computeTravelTime(nextDist, r.speedCmPerSec, r.accelerationCmPerSec2,
+                            r.decelerationCmPerSec2);
+                    nextTurnDuration = computeTurnDuration(pos, next, nextNext, nodes, nextTravelTime);
+                    double clearDist = Math.min(50.0, nextDist);
+                    tClear50 = computeTravelTime(clearDist, r.speedCmPerSec, r.accelerationCmPerSec2,
+                            r.decelerationCmPerSec2);
+                }
+
                 while (true) {
-                    // 1. Swap conflict on opposing edge: cannot advance onto shared single corridor
-                    double swapPushTo = -1;
-                    for (double[] iv : reservedEdge.getOrDefault(next + "_" + pos, Collections.emptyList())) {
-                        if (overlaps(tStart + turnDuration, tEnd, iv[0], iv[1])) {
-                            swapPushTo = Math.max(swapPushTo, iv[1]);
+                    double pushTo = -1.0;
+
+                    // 1. Edge Occupancy Conflict on edgeKey(pos, next):
+                    // If another vehicle has occupied this edge (in either direction, or is
+                    // changing its direction),
+                    // this robot MUST ALWAYS STOP at 'pos' until the edge is completely clear!
+                    for (double[] iv : reservedEdge.getOrDefault(eKey, Collections.emptyList())) {
+                        if (overlaps(tStart, tEnd, iv[0], iv[1])) {
+                            pushTo = Math.max(pushTo, iv[1]);
                         }
                     }
 
-                    if (swapPushTo > 0) {
-                        tStart = swapPushTo;
+                    if (pushTo > 0) {
+                        tStart = pushTo;
                         tEnd = tStart + stepDuration;
                         continue;
                     }
 
-                    // 2. Same-direction edge occupancy: another vehicle already on edge (pos ->
-                    // next)
-                    // If edge is occupied, robot must stop itself at pos until the preceding
-                    // vehicle clears the edge
-                    double sameEdgePushTo = -1;
-                    for (double[] iv : reservedEdge.getOrDefault(pos + "_" + next, Collections.emptyList())) {
-                        if (overlaps(tStart + turnDuration, tEnd, iv[0], iv[1])) {
-                            sameEdgePushTo = Math.max(sameEdgePushTo, iv[1]);
-                        }
-                    }
-
-                    if (sameEdgePushTo > 0) {
-                        tStart = sameEdgePushTo;
-                        tEnd = tStart + stepDuration;
-                        continue;
-                    }
-
-                    // 3. Node conflict at 'next' (converging intersection)
-                    double nodePushTo = -1;
+                    // 2. Node Conflict at 'next' (Converging traffic or preceding vehicle at
+                    // 'next'):
+                    // If another vehicle is at 'next', or changing direction at 'next', or clearing
+                    // within 50cm,
+                    // this robot MUST ALWAYS STOP at 'pos' until 'next' is completely clear!
+                    double nodePushTo = -1.0;
+                    double nodeRequiredEnd = (idx == r.path.size() - 1)
+                            ? (tEnd + safetyMarginSec)
+                            : (tEnd + nextTurnDuration + tClear50 + safetyMarginSec);
                     for (double[] iv : reservedNode.getOrDefault(next, Collections.emptyList())) {
-                        if (overlaps(tEnd - safetyMarginSec, tEnd + safetyMarginSec, iv[0], iv[1])) {
+                        if (overlaps(tEnd - safetyMarginSec, nodeRequiredEnd, iv[0], iv[1])) {
                             nodePushTo = Math.max(nodePushTo, iv[1] + safetyMarginSec);
                         }
                     }
 
-                    if (nodePushTo < 0)
-                        break;
-
-                    // 3/4th Distance Advance Algorithm:
-                    // Only advance 3/4th of the edge if the edge does NOT have any other vehicle on
-                    // it.
-                    // If the edge has another vehicle on it, the robot stops itself at pos until
-                    // clear.
-                    double t34TravelTime = computeTravelTime(0.75 * edgeDist, r.speedCmPerSec, r.accelerationCmPerSec2,
-                            r.decelerationCmPerSec2);
-                    double standoffArrival = tStart + turnDuration + t34TravelTime;
-                    boolean edgeOccupied = false;
-                    for (double[] iv : reservedEdge.getOrDefault(pos + "_" + next, Collections.emptyList())) {
-                        if (overlaps(tStart + turnDuration, standoffArrival, iv[0], iv[1])) {
-                            edgeOccupied = true;
-                            break;
-                        }
-                    }
-                    for (double[] iv : reservedEdge.getOrDefault(next + "_" + pos, Collections.emptyList())) {
-                        if (overlaps(tStart + turnDuration, standoffArrival, iv[0], iv[1])) {
-                            edgeOccupied = true;
-                            break;
-                        }
-                    }
-
-                    if (edgeOccupied) {
-                        // Edge is occupied: robot stops itself at pos until destination node clears
-                        tStart = nodePushTo;
+                    if (nodePushTo > 0) {
+                        // Stop at 'pos' until destination node clears
+                        tStart = Math.max(tStart, nodePushTo - stepDuration);
                         tEnd = tStart + stepDuration;
                         continue;
                     }
 
-                    // Edge is vacant: advance 3/4 distance to standoff waypoint
-                    double remTravelTime = computeTravelTime(0.25 * edgeDist, r.speedCmPerSec, r.accelerationCmPerSec2,
-                            r.decelerationCmPerSec2);
-                    tEnd = Math.max(tStart + stepDuration, Math.max(standoffArrival, nodePushTo) + remTravelTime);
-
-                    boolean recheckNeeded = false;
-                    for (double[] iv : reservedNode.getOrDefault(next, Collections.emptyList())) {
-                        if (overlaps(tEnd - safetyMarginSec, tEnd + safetyMarginSec, iv[0], iv[1])) {
-                            tEnd = Math.max(tEnd, iv[1] + safetyMarginSec + remTravelTime);
-                            recheckNeeded = true;
-                        }
-                    }
-
-                    if (!recheckNeeded)
-                        break;
+                    // All clear! No conflict!
+                    break;
                 }
 
-                reserveNode(reservedNode, pos, tStart - safetyMarginSec, tStart + turnDuration + safetyMarginSec);
-                reserveEdge(reservedEdge, pos, next, tStart + turnDuration, tEnd);
-                reserveNode(reservedNode, next, tEnd - safetyMarginSec, tEnd + safetyMarginSec);
+                // Reserve edge: occupied from departure through arrival, direction change
+                // (turn) at 'next',
+                // and 50cm clearance onto the next segment
+                double edgeClearEnd = (idx == r.path.size() - 1)
+                        ? (tEnd + safetyMarginSec)
+                        : (tEnd + nextTurnDuration + tClear50);
+                reserveEdge(reservedEdge, pos, next, tStart, edgeClearEnd);
+
+                // Reserve pos while waiting and turning (from arrival t through departure
+                // tStart + turnDuration)
+                reserveNode(reservedNode, pos, t - safetyMarginSec, tStart + turnDuration + safetyMarginSec);
+
+                // Reserve next node around arrival and through turn and 50cm clearance
+                double nodeClearEnd = (idx == r.path.size() - 1)
+                        ? (tEnd + safetyMarginSec)
+                        : (tEnd + nextTurnDuration + tClear50 + safetyMarginSec);
+                reserveNode(reservedNode, next, tEnd - safetyMarginSec, nodeClearEnd);
 
                 r.scheduleNodes.add(next);
                 r.scheduleTimes.add(tEnd);
@@ -563,7 +550,6 @@ public class RobotPathPlannerService {
         return instructions;
     }
 
-
     private static List<Integer> shortestPath(int src, int dst, String[][] connections, double[][] weights) {
         int N = weights.length;
         double[] dist = new double[N];
@@ -637,8 +623,12 @@ public class RobotPathPlannerService {
         map.computeIfAbsent(node, k -> new ArrayList<>()).add(new double[] { start, end });
     }
 
+    public static String edgeKey(int u, int v) {
+        return Math.min(u, v) + "_" + Math.max(u, v);
+    }
+
     private static void reserveEdge(Map<String, List<double[]>> map, int u, int v, double start, double end) {
-        map.computeIfAbsent(u + "_" + v, k -> new ArrayList<>()).add(new double[] { start, end });
+        map.computeIfAbsent(edgeKey(u, v), k -> new ArrayList<>()).add(new double[] { start, end });
     }
 
     public static double computeTravelTime(

@@ -870,8 +870,8 @@ export default function SchematicSimulation({
                                             />
                                         )}
 
-                                        {/* Standoff Indicator Ring */}
-                                        {veh.status?.includes("STANDOFF") && (
+                                        {/* 50cm Safety Buffer Indicator Ring */}
+                                        {(veh.status?.includes("50CM") || veh.status?.includes("SAFETY") || veh.status?.includes("STANDOFF")) && (
                                             <circle
                                                 cx={veh.x}
                                                 cy={veh.y}
@@ -889,8 +889,8 @@ export default function SchematicSimulation({
                                             cx={veh.x}
                                             cy={veh.y}
                                             r="16"
-                                            fill={veh.status?.includes("OCCUPIED") ? "#EF4444" : (veh.status?.includes("STANDOFF") ? "#F59E0B" : (veh.status?.includes("TURNING") ? "#F59E0B" : color))}
-                                            opacity={veh.status?.includes("OCCUPIED") ? "0.35" : (veh.status?.includes("STANDOFF") ? "0.35" : (veh.status?.includes("TURNING") ? "0.35" : "0.22"))}
+                                            fill={veh.status?.includes("OCCUPIED") ? "#EF4444" : ((veh.status?.includes("50CM") || veh.status?.includes("SAFETY") || veh.status?.includes("STANDOFF")) ? "#F59E0B" : (veh.status?.includes("TURNING") ? "#F59E0B" : color))}
+                                            opacity={veh.status?.includes("OCCUPIED") ? "0.35" : ((veh.status?.includes("50CM") || veh.status?.includes("SAFETY") || veh.status?.includes("STANDOFF")) ? "0.35" : (veh.status?.includes("TURNING") ? "0.35" : "0.22"))}
                                         />
 
                                         {/* Main AGV Dot */}
@@ -899,7 +899,7 @@ export default function SchematicSimulation({
                                             cy={veh.y}
                                             r="9"
                                             fill={color}
-                                            stroke={veh.status?.includes("OCCUPIED") ? "#EF4444" : (veh.status?.includes("STANDOFF") ? "#F59E0B" : (veh.status?.includes("TURNING") ? "#F59E0B" : "#FFFFFF"))}
+                                            stroke={veh.status?.includes("OCCUPIED") ? "#EF4444" : ((veh.status?.includes("50CM") || veh.status?.includes("SAFETY") || veh.status?.includes("STANDOFF")) ? "#F59E0B" : (veh.status?.includes("TURNING") ? "#F59E0B" : "#FFFFFF"))}
                                             strokeWidth="2.5"
                                             filter="url(#badge-shadow)"
                                         />
@@ -915,12 +915,12 @@ export default function SchematicSimulation({
                                         {/* Minimal Robot Label Badge */}
                                         <g transform={`translate(${veh.x}, ${veh.y - 18})`}>
                                             <rect
-                                                x={veh.status?.includes("OCCUPIED") ? "-40" : (veh.status?.includes("STANDOFF") ? "-36" : "-20")}
+                                                x={veh.status?.includes("OCCUPIED") ? "-40" : ((veh.status?.includes("50CM") || veh.status?.includes("SAFETY") || veh.status?.includes("STANDOFF")) ? "-36" : "-20")}
                                                 y="-10"
-                                                width={veh.status?.includes("OCCUPIED") ? "80" : (veh.status?.includes("STANDOFF") ? "72" : "40")}
+                                                width={veh.status?.includes("OCCUPIED") ? "80" : ((veh.status?.includes("50CM") || veh.status?.includes("SAFETY") || veh.status?.includes("STANDOFF")) ? "72" : "40")}
                                                 height="13"
                                                 rx="3"
-                                                fill={veh.status?.includes("OCCUPIED") ? "#DC2626" : (veh.status?.includes("STANDOFF") ? "#B45309" : "#111827")}
+                                                fill={veh.status?.includes("OCCUPIED") ? "#DC2626" : ((veh.status?.includes("50CM") || veh.status?.includes("SAFETY") || veh.status?.includes("STANDOFF")) ? "#B45309" : "#111827")}
                                                 opacity="0.92"
                                             />
                                             <text
@@ -934,7 +934,7 @@ export default function SchematicSimulation({
                                             >
                                                 {veh.status?.includes("OCCUPIED")
                                                     ? `R${idx + 1} (Edge Occupied)`
-                                                    : (veh.status?.includes("STANDOFF") ? `R${idx + 1} (3/4 Standoff)` : `R${idx + 1} ${turningAngle > 0 ? `(${turningAngle}°)` : ""}`)}
+                                                    : ((veh.status?.includes("50CM") || veh.status?.includes("SAFETY") || veh.status?.includes("STANDOFF")) ? `R${idx + 1} (50cm Buffer)` : `R${idx + 1} ${turningAngle > 0 ? `(${turningAngle}°)` : ""}`)}
                                             </text>
                                         </g>
 
@@ -1119,10 +1119,10 @@ export default function SchematicSimulation({
                                                     padding: "2px 5px",
                                                     borderRadius: "3px",
                                                     background: isSimulating
-                                                        ? (status.includes("OCCUPIED") ? "#FEE2E2" : (status.includes("STANDOFF") ? "#FEF3C7" : (status.includes("TURNING") ? "#FEF3C7" : (status.includes("FINAL") ? "#ECFDF5" : "#E0F2FE"))))
+                                                        ? (status.includes("OCCUPIED") ? "#FEE2E2" : ((status.includes("50CM") || status.includes("SAFETY") || status.includes("STANDOFF")) ? "#FEF3C7" : (status.includes("TURNING") ? "#FEF3C7" : (status.includes("FINAL") ? "#ECFDF5" : "#E0F2FE"))))
                                                         : "#F3F4F6",
                                                     color: isSimulating
-                                                        ? (status.includes("OCCUPIED") ? "#DC2626" : (status.includes("STANDOFF") ? "#B45309" : (status.includes("TURNING") ? "#B45309" : (status.includes("FINAL") ? "#059669" : "#0284C7"))))
+                                                        ? (status.includes("OCCUPIED") ? "#DC2626" : ((status.includes("50CM") || status.includes("SAFETY") || status.includes("STANDOFF")) ? "#B45309" : (status.includes("TURNING") ? "#B45309" : (status.includes("FINAL") ? "#059669" : "#0284C7"))))
                                                         : "#6B7280"
                                                 }}>
                                                     {status}
@@ -1194,7 +1194,7 @@ export default function SchematicSimulation({
                                             {veh?.turnStatus && (
                                                 <div style={{
                                                     fontSize: "10px",
-                                                    color: status.includes("OCCUPIED") ? "#DC2626" : ((status.includes("TURNING") || status.includes("STANDOFF")) ? "#B45309" : (status.includes("FINAL") ? "#059669" : "#6B7280")),
+                                                    color: status.includes("OCCUPIED") ? "#DC2626" : ((status.includes("TURNING") || status.includes("50CM") || status.includes("SAFETY") || status.includes("STANDOFF")) ? "#B45309" : (status.includes("FINAL") ? "#059669" : "#6B7280")),
                                                     fontWeight: 600
                                                 }}>
                                                     Status: {veh.turnStatus}

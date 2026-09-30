@@ -178,9 +178,71 @@ public class RobotPathPlannerServiceTest {
         assertEquals(2.0, resp1.scheduleTimes.get(2), 0.01);
 
         // R2 must NOT advance into L1->I1 while R1 is on that edge. It must wait at L1.
-        // Once R1 clears L1->I1 at 1.0s, R2 can depart.
+        // Once R1 clears L1->I1 and clears I1 by 50cm, R2 can depart.
         double r2ArriveI1 = resp2.scheduleTimes.get(1);
         assertTrue(r2ArriveI1 >= 1.0 + 1.0, "R2 must not arrive at I1 until R1 has cleared the edge plus transit time");
+    }
+
+    @Test
+    void testRobotStopsWhenEdgeOccupiedEvenWhenChangingDirection() throws Exception {
+        // L1 (0,0) -> I1 (60,0) -> U1 (60,-60) [90 degree right turn at I1]
+        // R1: moves L1 -> I1 (60cm), turns 90 degrees at I1 (changing direction), then moves I1 -> U1 (60cm)
+        // R2: moves L1 -> I1 -> U1 behind R1
+        // R2 MUST stop at L1 while R1 is on L1->I1 AND while R1 is changing its direction at I1!
+        String canvasData = "{"
+            + "\"nodes\": ["
+            + "  {\"id\": \"L1\", \"label\": \"L1\", \"type\": \"loading\", \"x\": 0, \"y\": 0},"
+            + "  {\"id\": \"I1\", \"label\": \"I1\", \"type\": \"intersection\", \"x\": 60, \"y\": 0},"
+            + "  {\"id\": \"U1\", \"label\": \"U1\", \"type\": \"unloading\", \"x\": 60, \"y\": -60}"
+            + "],"
+            + "\"edges\": ["
+            + "  {\"id\": \"e1\", \"from\": \"L1\", \"to\": \"I1\", \"distance\": 60.0},"
+            + "  {\"id\": \"e2\", \"from\": \"I1\", \"to\": \"U1\", \"distance\": 60.0}"
+            + "]"
+            + "}";
+
+        MapPlot plot = new MapPlot();
+        plot.setId(3L);
+        plot.setKeyId("turn-edge-key");
+        plot.setPlotName("Turn Edge Plot");
+
+        GraphReo graphReo = new GraphReo();
+        graphReo.setPlotId(3L);
+        graphReo.setCanvasData(canvasData);
+
+        when(mapPlotRepository.findByKeyId("turn-edge-key")).thenReturn(Optional.of(plot));
+        when(graphReoRepository.findById(3L)).thenReturn(Optional.of(graphReo));
+
+        RobotRequest r1 = new RobotRequest();
+        r1.id = 0;
+        r1.startNodeId = "L1";
+        r1.endNodeId = "U1";
+        r1.speedCmPerSec = 30.0; // 60cm / 30cm/s = 2.0s
+
+        RobotRequest r2 = new RobotRequest();
+        r2.id = 1;
+        r2.startNodeId = "L1";
+        r2.endNodeId = "U1";
+        r2.speedCmPerSec = 30.0;
+
+        List<RobotResponse> responses = plannerService.planRoutes("turn-edge-key", Arrays.asList(r1, r2));
+        assertNotNull(responses);
+        assertEquals(2, responses.size());
+
+        RobotResponse resp1 = responses.stream().filter(r -> r.id == 0).findFirst().orElseThrow();
+        RobotResponse resp2 = responses.stream().filter(r -> r.id == 1).findFirst().orElseThrow();
+
+        double r1ArrI1 = resp1.scheduleTimes.get(1); // R1 arrival at I1 = 2.0s
+        double r2ArrI1 = resp2.scheduleTimes.get(1);
+
+        System.out.println("=== Robot Stops When Edge Occupied & Changing Direction Test ===");
+        System.out.println("R1 schedule: " + resp1.scheduleTimes);
+        System.out.println("R2 schedule: " + resp2.scheduleTimes);
+
+        assertEquals(2.0, r1ArrI1, 0.01);
+        // R2 must wait at L1 while R1 is on L1->I1 and while R1 is changing its direction at I1
+        // Therefore R2 arrival at I1 must be strictly after R1 arrival + turn duration + clearance
+        assertTrue(r2ArrI1 > r1ArrI1 + 2.0, "R2 must wait at L1 while R1 is on the edge and changing direction at I1");
     }
 
     @Test
