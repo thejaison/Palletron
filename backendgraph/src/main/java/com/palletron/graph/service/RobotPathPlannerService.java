@@ -33,6 +33,8 @@ public class RobotPathPlannerService {
         public double speedCmPerSec;
         public double accelerationCmPerSec2;
         public double decelerationCmPerSec2;
+
+        public Double safetyDistanceCm;
     }
 
     // DTO for planning response
@@ -50,6 +52,8 @@ public class RobotPathPlannerService {
         public double accelerationCmPerSec2;
 
         public double decelerationCmPerSec2;
+
+        public double safetyDistanceCm;
 
         public List<RobotInstruction> instructions;
     }
@@ -140,7 +144,7 @@ public class RobotPathPlannerService {
             }
 
             Robot r = new Robot(req.id, src, dst, req.speedCmPerSec, req.accelerationCmPerSec2,
-                    req.decelerationCmPerSec2);
+                    req.decelerationCmPerSec2, req.safetyDistanceCm);
             r.path = shortestPath(r.src, r.dst, connections, weights);
             r.freeRunDistance = pathDistance(r.path, weights);
             r.freeRunTime = 0.0;
@@ -321,17 +325,17 @@ public class RobotPathPlannerService {
                 String eKey = edgeKey(pos, next);
 
                 // Compute time required for robot to change direction (turn) at 'next'
-                // and clear 50 cm away from 'next' along its subsequent segment
+                // and clear safety distance away from 'next' along its subsequent segment
                 double nextTurnDuration = 0.0;
-                double tClear50 = 0.0;
+                double tClearDist = 0.0;
                 if (idx < r.path.size() - 1) {
                     int nextNext = r.path.get(idx + 1);
                     double nextDist = weights[next][nextNext];
                     double nextTravelTime = computeTravelTime(nextDist, r.speedCmPerSec, r.accelerationCmPerSec2,
                             r.decelerationCmPerSec2);
                     nextTurnDuration = computeTurnDuration(pos, next, nextNext, nodes, nextTravelTime);
-                    double clearDist = Math.min(50.0, nextDist);
-                    tClear50 = computeTravelTime(clearDist, r.speedCmPerSec, r.accelerationCmPerSec2,
+                    double clearDist = Math.min(r.safetyDistanceCm, nextDist);
+                    tClearDist = computeTravelTime(clearDist, r.speedCmPerSec, r.accelerationCmPerSec2,
                             r.decelerationCmPerSec2);
                 }
 
@@ -355,47 +359,77 @@ public class RobotPathPlannerService {
                     }
 
                     // 2. Node Conflict at 'next' (Converging traffic or preceding vehicle at
-                    // 'next'):
-                    // If another vehicle is at 'next', or changing direction at 'next', or clearing
-                    // within 50cm,
-                    // this robot MUST ALWAYS STOP at 'pos' until 'next' is completely clear!
+                    // 'next' or edge connected to 'next' occupied):
                     double nodePushTo = -1.0;
                     double nodeRequiredEnd = (idx == r.path.size() - 1)
                             ? (tEnd + safetyMarginSec)
-                            : (tEnd + nextTurnDuration + tClear50 + safetyMarginSec);
+                            : (tEnd + nextTurnDuration + tClearDist + safetyMarginSec);
                     for (double[] iv : reservedNode.getOrDefault(next, Collections.emptyList())) {
                         if (overlaps(tEnd - safetyMarginSec, nodeRequiredEnd, iv[0], iv[1])) {
                             nodePushTo = Math.max(nodePushTo, iv[1] + safetyMarginSec);
                         }
                     }
 
-                    if (nodePushTo > 0) {
-                        // Stop at 'pos' until destination node clears
+                    if (nodePushTo <= 0) {
+                        // All clear! No conflict!
+                        break;
+                    }
+
+                    // 3/4th Distance Advance Algorithm:
+                    // If the approaching robot's edge (pos -> next) is NOT occupied by another vehicle,
+                    // all other robots approaching the occupied edge/node advance 3/4th of the edge distance
+                    // and wait at the 3/4th standoff point until the edge/node clears!
+                    double t34TravelTime = computeTravelTime(0.75 * edgeDist, r.speedCmPerSec, r.accelerationCmPerSec2,
+                            r.decelerationCmPerSec2);
+                    double standoffArrival = tStart + turnDuration + t34TravelTime;
+                    boolean edgeOccupied = false;
+                    for (double[] iv : reservedEdge.getOrDefault(eKey, Collections.emptyList())) {
+                        if (overlaps(tStart, standoffArrival, iv[0], iv[1])) {
+                            edgeOccupied = true;
+                            break;
+                        }
+                    }
+
+                    if (edgeOccupied) {
+                        // Edge is occupied: robot stops itself at pos until destination node clears
                         tStart = Math.max(tStart, nodePushTo - stepDuration);
                         tEnd = tStart + stepDuration;
                         continue;
                     }
 
-                    // All clear! No conflict!
-                    break;
+                    // Edge is vacant: advance 3/4 distance to standoff waypoint and hold there
+                    double remTravelTime = computeTravelTime(0.25 * edgeDist, r.speedCmPerSec, r.accelerationCmPerSec2,
+                            r.decelerationCmPerSec2);
+                    tEnd = Math.max(tStart + stepDuration, Math.max(standoffArrival, nodePushTo) + remTravelTime);
+
+                    boolean recheckNeeded = false;
+                    for (double[] iv : reservedNode.getOrDefault(next, Collections.emptyList())) {
+                        if (overlaps(tEnd - safetyMarginSec, tEnd + safetyMarginSec, iv[0], iv[1])) {
+                            tEnd = Math.max(tEnd, iv[1] + safetyMarginSec + remTravelTime);
+                            recheckNeeded = true;
+                        }
+                    }
+
+                    if (!recheckNeeded)
+                        break;
                 }
 
                 // Reserve edge: occupied from departure through arrival, direction change
                 // (turn) at 'next',
-                // and 50cm clearance onto the next segment
+                // and safety distance clearance onto the next segment
                 double edgeClearEnd = (idx == r.path.size() - 1)
                         ? (tEnd + safetyMarginSec)
-                        : (tEnd + nextTurnDuration + tClear50);
+                        : (tEnd + nextTurnDuration + tClearDist);
                 reserveEdge(reservedEdge, pos, next, tStart, edgeClearEnd);
 
                 // Reserve pos while waiting and turning (from arrival t through departure
                 // tStart + turnDuration)
                 reserveNode(reservedNode, pos, t - safetyMarginSec, tStart + turnDuration + safetyMarginSec);
 
-                // Reserve next node around arrival and through turn and 50cm clearance
+                // Reserve next node around arrival and through turn and clearance distance
                 double nodeClearEnd = (idx == r.path.size() - 1)
                         ? (tEnd + safetyMarginSec)
-                        : (tEnd + nextTurnDuration + tClear50 + safetyMarginSec);
+                        : (tEnd + nextTurnDuration + tClearDist + safetyMarginSec);
                 reserveNode(reservedNode, next, tEnd - safetyMarginSec, nodeClearEnd);
 
                 r.scheduleNodes.add(next);
@@ -425,6 +459,7 @@ public class RobotPathPlannerService {
             res.speedCmPerSec = r.speedCmPerSec;
             res.accelerationCmPerSec2 = r.accelerationCmPerSec2;
             res.decelerationCmPerSec2 = r.decelerationCmPerSec2;
+            res.safetyDistanceCm = r.safetyDistanceCm;
             res.instructions = generateInstructions(r, nodes, weights);
             responses.add(res);
         }
@@ -449,6 +484,7 @@ public class RobotPathPlannerService {
         double speedCmPerSec;
         double accelerationCmPerSec2;
         double decelerationCmPerSec2;
+        double safetyDistanceCm;
 
         List<Integer> path = new ArrayList<>();
         @SuppressWarnings("unused")
@@ -460,7 +496,8 @@ public class RobotPathPlannerService {
         Robot(int id, int src, int dst,
                 double speedCmPerSec,
                 double accelerationCmPerSec2,
-                double decelerationCmPerSec2) {
+                double decelerationCmPerSec2,
+                Double safetyDistanceCm) {
 
             this.id = id;
             this.src = src;
@@ -469,6 +506,7 @@ public class RobotPathPlannerService {
             this.speedCmPerSec = speedCmPerSec;
             this.accelerationCmPerSec2 = accelerationCmPerSec2;
             this.decelerationCmPerSec2 = decelerationCmPerSec2;
+            this.safetyDistanceCm = (safetyDistanceCm != null && safetyDistanceCm > 0) ? safetyDistanceCm : 50.0;
         }
     }
 

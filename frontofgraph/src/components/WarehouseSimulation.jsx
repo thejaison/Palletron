@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import styles from "../styles/CreatePathStyles";
 import { useNavigate } from "react-router-dom";
 import {
@@ -309,12 +309,13 @@ const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
             if (waitTime > 0.01) {
                 const nodeLabel = nodes.find(n => n.id === u)?.label || u;
                 const nextLabel = nodes.find(n => n.id === v)?.label || v;
+                const safety = req.safetyDistanceCm !== undefined ? req.safetyDistanceCm : 50;
 
                 logs.push({
                     id: `delay-r-${p.id}-${k}`,
                     time: -0.01,
                     type: "scheduler",
-                    text: `Robot ${p.id + 1}: Traffic conflict detected approaching ${nextLabel}. Scheduled to hold at ${nodeLabel} to maintain edge exclusivity and 50cm vehicle safety distance (Edge Dist = ${dist.toFixed(1)}cm).`
+                    text: `Robot ${p.id + 1}: Traffic conflict detected approaching ${nextLabel}. Advancing 3/4th distance (${(dist * 0.75).toFixed(1)}cm) from ${nodeLabel} and holding at 3/4th standoff buffer while edge ahead is occupied (${safety}cm vehicle buffer enforced).`
                 });
             }
         }
@@ -331,13 +332,14 @@ const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
             freeRunTime += calculateKinematics(dist, req.speedCmPerSec || 50, req.accelTimeSec || 1.0, req.decelTimeSec || 1.0).totalTime;
         }
         const totalWait = totalTime - freeRunTime;
+        const safety = req.safetyDistanceCm !== undefined ? req.safetyDistanceCm : 50;
 
         if (totalWait > 0.01) {
             logs.push({
                 id: `wait-summary-r-${p.id}`,
                 time: -0.01,
                 type: "scheduler",
-                text: `Robot ${p.id + 1}: Final arrival scheduled at ${totalTime.toFixed(2)}s (holding at nodes when edge occupied; 50cm safety buffer strictly enforced).`
+                text: `Robot ${p.id + 1}: Final arrival scheduled at ${totalTime.toFixed(2)}s (holding at 3/4th standoff buffers; ${safety}cm safety buffer strictly enforced).`
             });
         } else {
             logs.push({
@@ -353,7 +355,7 @@ const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
         id: `sys-ready`,
         time: -0.005,
         type: "success",
-        text: `Conflict resolution complete. Edge occupancy exclusivity & 50cm safety distance enforced. Simulation ready.`
+        text: `Conflict resolution complete. Edge occupancy exclusivity, 3/4th standoff buffers & safety distance enforced. Simulation ready.`
     });
 
     // 4. Create live simulation logs that appear as time t advances
@@ -427,27 +429,41 @@ const generateTerminalLogs = (plans, robotRequests, nodes, edges) => {
             const waitDelay = arrTime - prevArrTime - (turnDuration + travelTime);
             if (waitDelay > 0.05) {
                 const tTurnEnd = prevArrTime + turnDuration;
-                const tDepart = Math.max(tTurnEnd, arrTime - travelTime);
+                const advanceDist = dist * 0.75;
+                const remDist = dist * 0.25;
+                const kin75 = calculateKinematics(advanceDist, req.speedCmPerSec || 50, req.accelTimeSec || 1.0, req.decelTimeSec || 1.0, 0);
+                const kin25 = calculateKinematics(remDist, req.speedCmPerSec || 50, req.accelTimeSec || 1.0, req.decelTimeSec || 1.0, 0);
+                const t34TravelTime = kin75.totalTime;
+                const remTravelTime = kin25.totalTime;
+                const tStandoffArrival = tTurnEnd + t34TravelTime;
+                const tFinalDepart = Math.max(tStandoffArrival, arrTime - remTravelTime);
+                const safety = req.safetyDistanceCm !== undefined ? req.safetyDistanceCm : 50;
 
                 if (hasTurn) {
                     logs.push({
                         id: `live-turn-r-${p.id}-${k}`,
                         time: prevArrTime,
                         type: "info",
-                        text: `Robot ${p.id + 1}: Steering tires ${turnAngle}° ${turnDir} at ${uLabel} while holding.`
+                        text: `Robot ${p.id + 1}: Steering tires ${turnAngle}° ${turnDir} at ${uLabel} before 3/4 advance.`
                     });
                 }
                 logs.push({
+                    id: `live-adv-r-${p.id}-${k}`,
+                    time: tTurnEnd,
+                    type: "info",
+                    text: `Robot ${p.id + 1}: Advancing 3/4th distance (${advanceDist.toFixed(1)}cm) towards ${nodeLabel}.`
+                });
+                logs.push({
                     id: `live-hold-r-${p.id}-${k}`,
-                    time: prevArrTime + (hasTurn ? turnDuration : 0),
+                    time: tStandoffArrival,
                     type: "warning",
-                    text: `Robot ${p.id + 1}: Holding at ${uLabel} - Edge towards ${nodeLabel} occupied / maintaining 50cm safety distance.`
+                    text: `Robot ${p.id + 1}: Holding at 3/4th standoff point (${(dist * 0.25).toFixed(1)}cm buffer) - Edge connecting ${nodeLabel} occupied (${safety}cm vehicle buffer).`
                 });
                 logs.push({
                     id: `live-clear-r-${p.id}-${k}`,
-                    time: tDepart,
+                    time: tFinalDepart,
                     type: "success",
-                    text: `Robot ${p.id + 1}: Edge towards ${nodeLabel} cleared & 50cm safety distance verified. Departed ${uLabel}.`
+                    text: `Robot ${p.id + 1}: Connecting edge cleared. Resuming from 3/4th standoff for final approach into ${nodeLabel}.`
                 });
             } else {
                 if (hasTurn) {
@@ -533,7 +549,39 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
     const maxSimTimeRef = useRef(0);
     const lastFrameTimeRef = useRef(null);
 
+    // Compute currently occupied edges and their connecting terminal nodes
+    const { occupiedNodesMap, occupiedEdgeSet } = useMemo(() => {
+        const nodeMap = new Map();
+        const edgeSet = new Set();
 
+        vehicles.forEach(v => {
+            if (!v || v.status === "DESTINATION REACHED" || v.status === "IDLE" || !v.fromNodeId || !v.toNodeId) {
+                return;
+            }
+            // A vehicle actively occupies an edge if it is traversing (moving, turning, cruising, 3/4 standoff, or safety buffer)
+            const isTraversing = v.motionPhase !== "STOPPED" || 
+                                 v.status?.includes("STANDOFF") || 
+                                 v.status?.includes("MOVING") || 
+                                 v.status?.includes("TURNING") || 
+                                 v.status?.includes("APPROACH") ||
+                                 v.status?.includes("SAFETY");
+
+            if (isTraversing) {
+                const pair1 = `${v.fromNodeId}_${v.toNodeId}`;
+                const pair2 = `${v.toNodeId}_${v.fromNodeId}`;
+                edgeSet.add(pair1);
+                edgeSet.add(pair2);
+
+                if (!nodeMap.has(v.fromNodeId)) nodeMap.set(v.fromNodeId, []);
+                nodeMap.get(v.fromNodeId).push(v);
+
+                if (!nodeMap.has(v.toNodeId)) nodeMap.set(v.toNodeId, []);
+                nodeMap.get(v.toNodeId).push(v);
+            }
+        });
+
+        return { occupiedNodesMap: nodeMap, occupiedEdgeSet: edgeSet };
+    }, [vehicles]);
 
     // Tab switcher that ensures simulations from different tabs do not bleed into each other
     const handleSwitchTab = (tab) => {
@@ -603,7 +651,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             ...existing,
                             speedCmPerSec: existing.speedCmPerSec || 50,
                             accelTimeSec: existing.accelTimeSec !== undefined ? Number(existing.accelTimeSec) : 1.0,
-                            decelTimeSec: existing.decelTimeSec !== undefined ? Number(existing.decelTimeSec) : 1.0
+                            decelTimeSec: existing.decelTimeSec !== undefined ? Number(existing.decelTimeSec) : 1.0,
+                            safetyDistanceCm: existing.safetyDistanceCm !== undefined ? Number(existing.safetyDistanceCm) : 50.0
                         });
                     } else {
                         updatedRobots.push({
@@ -612,7 +661,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             endNodeId: unloadingNodes[i % unloadingNodes.length]?.id || "",
                             speedCmPerSec: 50,
                             accelTimeSec: 1.0,
-                            decelTimeSec: 1.0
+                            decelTimeSec: 1.0,
+                            safetyDistanceCm: 50.0
                         });
                     }
                 }
@@ -657,7 +707,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     endNodeId: endNode.id,
                     speedCmPerSec: route.speedCmPerSec || 50,
                     accelTimeSec: route.accelTimeSec !== undefined ? Number(route.accelTimeSec) : 1.0,
-                    decelTimeSec: route.decelTimeSec !== undefined ? Number(route.decelTimeSec) : 1.0
+                    decelTimeSec: route.decelTimeSec !== undefined ? Number(route.decelTimeSec) : 1.0,
+                    safetyDistanceCm: route.safetyDistanceCm !== undefined ? Number(route.safetyDistanceCm) : 50.0
                 });
             }
 
@@ -715,6 +766,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         speedCmPerSec: req.speedCmPerSec || 50,
                         accelTimeSec: req.accelTimeSec !== undefined ? req.accelTimeSec : 1.0,
                         decelTimeSec: req.decelTimeSec !== undefined ? req.decelTimeSec : 1.0,
+                        safetyDistanceCm: p.safetyDistanceCm || req.safetyDistanceCm || 50.0,
                         currentSpeed: 0,
                         currentAccel: 0,
                         motionPhase: "STOPPED",
@@ -804,11 +856,12 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         };
                     }
 
-                    const { scheduleNodes, scheduleTimes, speedCmPerSec = 50, accelTimeSec = 1.0, decelTimeSec = 1.0 } = veh;
+                    const { scheduleNodes, scheduleTimes, speedCmPerSec = 50, accelTimeSec = 1.0, decelTimeSec = 1.0, safetyDistanceCm = 50.0 } = veh;
                     if (!scheduleNodes || scheduleNodes.length === 0) return veh;
 
                     const delay = veh.delayAccumSec || 0;
                     const t = Math.max(0, globalElapsed - delay);
+                    const safetyDist = veh.safetyDistanceCm !== undefined ? Number(veh.safetyDistanceCm) : 50.0;
 
                     // If robot hasn't reached scheduled departure at start node, check staging
                     if (scheduleTimes.length > 0 && t < scheduleTimes[0]) {
@@ -820,9 +873,11 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             if (j === i) continue;
                             const other = prevVehicles[j];
                             const sDist = Math.hypot(other.x - (startNode ? startNode.x : veh.x), other.y - (startNode ? startNode.y : veh.y)) * defaultScale;
-                            if (sDist <= 50.0) {
+                            const otherSafety = other.safetyDistanceCm !== undefined ? Number(other.safetyDistanceCm) : 50.0;
+                            const requiredBuffer = Math.max(safetyDist, otherSafety);
+                            if (sDist <= requiredBuffer) {
                                 blockedAtStart = true;
-                                blkInfo = { id: other.robotId, dist: sDist };
+                                blkInfo = { id: other.robotId, dist: sDist, req: requiredBuffer };
                                 break;
                             }
                         }
@@ -833,8 +888,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 x: startNode ? startNode.x : veh.x,
                                 y: startNode ? startNode.y : veh.y,
                                 delayAccumSec: delay + dt,
-                                status: "STOPPED (50CM SAFETY DISTANCE)",
-                                turnStatus: `Safety Stop: Robot ${blkInfo.id + 1} within 50cm (${blkInfo.dist.toFixed(1)}cm)`,
+                                status: `STOPPED (${Math.round(blkInfo.req)}CM SAFETY DISTANCE)`,
+                                turnStatus: `Safety Stop: Robot ${blkInfo.id + 1} within ${Math.round(blkInfo.req)}cm (${blkInfo.dist.toFixed(1)}cm)`,
                                 currentSpeed: 0,
                                 currentAccel: 0,
                                 motionPhase: "STOPPED"
@@ -926,28 +981,42 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     const turnDuration = hasTurn ? Math.min(desiredTurnTime, maxTurnTime) : 0;
                     const dir = angleDiff > 0 ? "Counter-Clockwise (Left)" : "Clockwise (Right)";
 
-                    const minStepTime = turnDuration + travelTime;
-                    const waitDelay = (tArrivalTo - tArrivalFrom) - minStepTime;
-                    const tTurnEnd = tArrivalFrom + turnDuration;
+                    const fixedTurnDuration = hasTurn ? Math.min(desiredTurnTime, 0.8) : 0;
+                    const tTurnEnd = tArrivalFrom + fixedTurnDuration;
+                    const minStepTime = fixedTurnDuration + travelTime;
+
+                    // 3/4th Advance Kinematics:
+                    const kin75 = calculateKinematics(0.75 * distance, speedCmPerSec, accelTimeSec, decelTimeSec, 0);
+                    const t34TravelTime = kin75.totalTime;
+                    const tStandoffArrival = tTurnEnd + t34TravelTime;
+
+                    const kin25 = calculateKinematics(0.25 * distance, speedCmPerSec, accelTimeSec, decelTimeSec, 0);
+                    const tFinalTravelTime = kin25.totalTime;
+                    const tFinalDepart = Math.max(tStandoffArrival, tArrivalTo - tFinalTravelTime);
+
+                    // Departure time if continuous without standoff:
                     const tDepart = Math.max(tTurnEnd, tArrivalTo - travelTime);
 
+                    const vehSafetyDist = veh.safetyDistanceCm !== undefined ? veh.safetyDistanceCm : 50.0;
+
                     // =========================================================
-                    // 1. HARD 50 CM PROXIMITY CHECK WITH PRIORITY RESOLUTION:
-                    // "The most priority one will move and then followed by the other"
+                    // 1. HARD PROXIMITY CHECK (CONFIGURABLE SAFETY DISTANCE) WITH PRIORITY RESOLUTION
                     // =========================================================
-                    let isBlocked50cm = false;
+                    let isBlockedSafetyDist = false;
                     let blockDetails = null;
 
                     for (let j = 0; j < prevVehicles.length; j++) {
                         if (j === i) continue;
                         const other = prevVehicles[j];
+                        const otherSafetyDist = other.safetyDistanceCm !== undefined ? other.safetyDistanceCm : 50.0;
+                        const requiredBuffer = Math.max(vehSafetyDist, otherSafetyDist);
 
                         const dx = other.x - veh.x;
                         const dy = other.y - veh.y;
                         const pxDist = Math.hypot(dx, dy);
                         const distCm = pxDist * scaleCmPerPx;
 
-                        if (distCm <= 50.0) {
+                        if (distCm <= requiredBuffer) {
                             const distForwardCm = (dx * fwdX + dy * fwdY) * scaleCmPerPx;
                             const distLateralCm = Math.abs(dx * (-fwdY) + dy * fwdX) * scaleCmPerPx;
 
@@ -958,8 +1027,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
 
                             // If other vehicle is parked at its final destination in front:
                             if (other.status === "DESTINATION REACHED" && distForwardCm > 0) {
-                                isBlocked50cm = true;
-                                blockDetails = { id: other.robotId, distCm, label: `Parked Robot R${other.robotId + 1}` };
+                                isBlockedSafetyDist = true;
+                                blockDetails = { id: other.robotId, distCm, requiredBuffer, label: `Parked Robot R${other.robotId + 1}` };
                                 break;
                             }
 
@@ -969,27 +1038,22 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             const vehHasHigherPriority = veh.robotId < other.robotId;
 
                             if (otherHasHigherPriority) {
-                                // Other vehicle has HIGHER priority!
-                                // The most priority one (other) will move, and THIS vehicle (veh) MUST STOP!
-                                isBlocked50cm = true;
-                                blockDetails = { id: other.robotId, distCm, label: `Priority Robot R${other.robotId + 1}` };
+                                isBlockedSafetyDist = true;
+                                blockDetails = { id: other.robotId, distCm, requiredBuffer, label: `Priority Robot R${other.robotId + 1}` };
                                 break;
                             } else if (vehHasHigherPriority) {
-                                // THIS vehicle has HIGHER priority!
-                                // "The most priority one will move and then followed by the other"
-                                // veh will move! veh does NOT stop! 'other' yields and follows behind!
+                                // veh has higher priority, does not stop
                             } else {
-                                if (distForwardCm > 0.5 && distLateralCm < 40.0) {
-                                    isBlocked50cm = true;
-                                    blockDetails = { id: other.robotId, distCm, label: `Robot R${other.robotId + 1}` };
+                                if (distForwardCm > 0.5 && distLateralCm < requiredBuffer * 0.8) {
+                                    isBlockedSafetyDist = true;
+                                    blockDetails = { id: other.robotId, distCm, requiredBuffer, label: `Robot R${other.robotId + 1}` };
                                     break;
                                 }
                             }
                         }
                     }
 
-                    if (isBlocked50cm) {
-                        // IMMEDIATELY FREEZE POSITION AND ACCUMULATE DELAY
+                    if (isBlockedSafetyDist) {
                         return {
                             ...veh,
                             x: veh.x,
@@ -998,106 +1062,100 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             currentSpeed: 0,
                             currentAccel: 0,
                             motionPhase: "STOPPED",
-                            status: "STOPPED (50CM SAFETY DISTANCE)",
-                            turnStatus: `Yielding to ${blockDetails.label} (${blockDetails.distCm.toFixed(1)}cm) - Will follow once clear`
+                            status: `STOPPED (${Math.round(blockDetails.requiredBuffer)}CM SAFETY DISTANCE)`,
+                            turnStatus: `Yielding to ${blockDetails.label} (${blockDetails.distCm.toFixed(1)}cm) - Keeping ${Math.round(blockDetails.requiredBuffer)}cm buffer`
                         };
                     }
 
                     // =========================================================
-                    // 2. EDGE OCCUPANCY CHECK: STOP AT ORIGIN NODE IF EDGE IS OCCUPIED
+                    // 2. CHECK IF CURRENT EDGE (fromNode -> toNode) IS OCCUPIED
                     // =========================================================
                     const distFromFromNode = Math.hypot(veh.x - fromNode.x, veh.y - fromNode.y) * scaleCmPerPx;
                     const isAtOriginNode = distFromFromNode < 12.0 || t < tDepart;
 
-                    if (isAtOriginNode) {
-                        let isEdgeOccupied = false;
-                        for (let j = 0; j < prevVehicles.length; j++) {
-                            if (j === i) continue;
-                            const other = prevVehicles[j];
-                            if (other.status === "DESTINATION REACHED") {
-                                if (other.scheduleNodes && other.scheduleNodes[other.scheduleNodes.length - 1] === toNodeId) {
-                                    isEdgeOccupied = true;
-                                    break;
-                                }
-                                continue;
-                            }
+                    let isCurrentEdgeOccupied = false;
+                    let currentEdgeBlocker = "";
 
-                            const oFrom = other.fromNodeId;
-                            const oTo = other.toNodeId;
-                            const onSameEdge = (oFrom === fromNodeId && oTo === toNodeId) || (oFrom === toNodeId && oTo === fromNodeId);
-                            if (onSameEdge && other.status !== "DESTINATION REACHED") {
-                                const distOtherFromOrigin = Math.hypot(other.x - fromNode.x, other.y - fromNode.y) * scaleCmPerPx;
-                                // If other is already traversing the edge:
-                                if (distOtherFromOrigin > 15.0) {
-                                    isEdgeOccupied = true;
-                                    break;
-                                }
-                                // If other is waiting at the same origin node, only yield if other has HIGHER priority:
-                                if (other.robotId < veh.robotId) {
-                                    isEdgeOccupied = true;
-                                    break;
-                                }
+                    for (let j = 0; j < prevVehicles.length; j++) {
+                        if (j === i) continue;
+                        const other = prevVehicles[j];
+                        if (other.status === "DESTINATION REACHED") {
+                            if (other.scheduleNodes && other.scheduleNodes[other.scheduleNodes.length - 1] === toNodeId) {
+                                isCurrentEdgeOccupied = true;
+                                currentEdgeBlocker = `Parked Robot R${other.robotId + 1}`;
+                                break;
                             }
-
-                            // Other vehicle turning at toNode or within 50cm of toNode
-                            const distOtherToNode = Math.hypot(other.x - toNode.x, other.y - toNode.y) * scaleCmPerPx;
-                            if (distOtherToNode <= 50.0 && (other.motionPhase === "TURNING" || other.status?.includes("TURNING"))) {
-                                if (other.robotId < veh.robotId || distOtherToNode < 25.0) {
-                                    isEdgeOccupied = true;
-                                    break;
-                                }
-                            }
+                            continue;
                         }
 
-                        if (isEdgeOccupied) {
-                            return {
-                                ...veh,
-                                x: fromNode.x,
-                                y: fromNode.y,
-                                delayAccumSec: delay + dt,
-                                currentSpeed: 0,
-                                currentAccel: 0,
-                                motionPhase: "STOPPED",
-                                status: "WAITING AT NODE (EDGE OCCUPIED)",
-                                turnStatus: `Holding at Node - Edge Occupied by another vehicle (50cm buffer)`
-                            };
+                        const oFrom = other.fromNodeId;
+                        const oTo = other.toNodeId;
+                        const onSameEdge = (oFrom === fromNodeId && oTo === toNodeId) || (oFrom === toNodeId && oTo === fromNodeId);
+                        if (onSameEdge && other.status !== "DESTINATION REACHED") {
+                            const distOtherFromOrigin = Math.hypot(other.x - fromNode.x, other.y - fromNode.y) * scaleCmPerPx;
+                            if (distOtherFromOrigin > 15.0) {
+                                isCurrentEdgeOccupied = true;
+                                currentEdgeBlocker = `Robot R${other.robotId + 1}`;
+                                break;
+                            }
+                            if (other.robotId < veh.robotId) {
+                                isCurrentEdgeOccupied = true;
+                                currentEdgeBlocker = `Priority Robot R${other.robotId + 1}`;
+                                break;
+                            }
                         }
                     }
 
-                    // =========================================================
-                    // 3. SCHEDULED HOLD AT NODE (WAIT FOR tDepart)
-                    // =========================================================
-                    if (t < tDepart) {
-                        let heading = segHeading;
-                        let turningAngle = 0;
-                        if (hasTurn) {
-                            const steerDuration = Math.min(turnDuration > 0 ? turnDuration : 0.8, 0.8);
-                            const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, steerDuration)));
-                            const turnEase = 0.5 - 0.5 * Math.cos(turnProgress * Math.PI);
-                            heading = Math.round((prevHeading + angleDiff * turnEase + 360) % 360);
-                            turningAngle = Math.abs(Math.round(angleDiff * (1 - turnProgress)));
-                        }
+                    if (isCurrentEdgeOccupied && isAtOriginNode) {
                         return {
                             ...veh,
                             x: fromNode.x,
                             y: fromNode.y,
-                            heading,
-                            turningAngle,
+                            delayAccumSec: delay + dt,
                             currentSpeed: 0,
                             currentAccel: 0,
                             motionPhase: "STOPPED",
-                            status: "WAITING AT NODE",
-                            turnStatus: `Holding at Node - Scheduled departure at ${tDepart.toFixed(2)}s`,
-                            fromNodeId,
-                            toNodeId,
-                            fromNodeLabel: fromNode.label || fromNode.id,
-                            toNodeLabel: toNode.label || toNode.id,
-                            segmentDistance: distance
+                            status: "WAITING AT NODE (EDGE OCCUPIED)",
+                            turnStatus: `Holding at Node - Edge Occupied by ${currentEdgeBlocker}`
                         };
                     }
 
                     // =========================================================
-                    // 4. NORMAL MOTION / KINEMATICS
+                    // 3. CHECK IF DESTINATION NODE / CONNECTING EDGE IS OCCUPIED (3/4TH STANDOFF TRIGGER)
+                    // =========================================================
+                    let isToNodeOccupiedAhead = false;
+                    let toNodeOccupiedInfo = "";
+
+                    for (let j = 0; j < prevVehicles.length; j++) {
+                        if (j === i) continue;
+                        const other = prevVehicles[j];
+                        if (other.status === "DESTINATION REACHED") continue;
+
+                        // Check if other is occupying an edge connected to toNode
+                        const connectsToNode = (other.fromNodeId === toNodeId || other.toNodeId === toNodeId);
+                        if (connectsToNode) {
+                            const otherIsTraversing = other.motionPhase !== "STOPPED" || 
+                                                      other.status?.includes("STANDOFF") || 
+                                                      other.status?.includes("MOVING") || 
+                                                      other.status?.includes("TURNING") || 
+                                                      other.status?.includes("APPROACH");
+                            
+                            const distOtherToNode = Math.hypot(other.x - toNode.x, other.y - toNode.y) * scaleCmPerPx;
+                            const otherSafety = other.safetyDistanceCm || 50.0;
+
+                            if (otherIsTraversing || distOtherToNode <= otherSafety + 25.0) {
+                                isToNodeOccupiedAhead = true;
+                                toNodeOccupiedInfo = `Robot R${other.robotId + 1}`;
+                                break;
+                            }
+                        }
+                    }
+
+                    const hasScheduledHold = (tArrivalTo - tArrivalFrom) >= (minStepTime + 0.1) && tFinalDepart >= tStandoffArrival;
+                    const shouldAdvance34 = (hasScheduledHold || isToNodeOccupiedAhead) && !isCurrentEdgeOccupied;
+
+                    // =========================================================
+                    // 4. MOTION EXECUTION: 3/4TH STANDOFF ADVANCE VS STANDARD
                     // =========================================================
                     let heading = segHeading;
                     let turningAngle = 0;
@@ -1109,83 +1167,288 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     let status = "MOVING";
                     let turnStatus = "Straight (0°)";
 
-                    if (hasTurn && t < tTurnEnd) {
-                        x = fromNode.x;
-                        y = fromNode.y;
-                        const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, turnDuration)));
-                        const turnEase = 0.5 - 0.5 * Math.cos(turnProgress * Math.PI);
-                        heading = Math.round((prevHeading + angleDiff * turnEase + 360) % 360);
-                        turningAngle = Math.abs(Math.round(angleDiff * (1 - turnProgress)));
-                        status = fromNode.type === "intersection" ? "TURNING AT INTERSECTION" : "TURNING AT NODE";
-                        turnStatus = `Turning ${Math.abs(Math.round(angleDiff))}° ${dir} (Tires Steering)`;
-                        currentSpeed = 0;
-                        currentAccel = 0;
-                        motionPhase = "TURNING";
-                    } else {
-                        const moveDuration = Math.max(0.001, tArrivalTo - tDepart);
-                        const moveElapsed = Math.max(0, t - tDepart);
-                        const effectiveElapsed = Math.min(kinSeg.totalTime, moveElapsed * (kinSeg.totalTime / moveDuration));
-                        const kin = calculateKinematics(distance, speedCmPerSec, accelTimeSec, decelTimeSec, effectiveElapsed);
-                        const progress = Math.min(1, Math.max(0, kin.progress));
+                    if (shouldAdvance34) {
+                        // 3/4th Advance Standoff Sequence
+                        // Phase 1: Turn at fromNode before advance
+                        if (hasTurn && t < tTurnEnd) {
+                            x = fromNode.x;
+                            y = fromNode.y;
+                            const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, fixedTurnDuration)));
+                            const turnEase = 0.5 - 0.5 * Math.cos(turnProgress * Math.PI);
+                            heading = Math.round((prevHeading + angleDiff * turnEase + 360) % 360);
+                            turningAngle = Math.abs(Math.round(angleDiff * (1 - turnProgress)));
+                            status = fromNode.type === "intersection" ? "TURNING AT INTERSECTION" : "TURNING AT NODE";
+                            turnStatus = `Steering ${Math.abs(Math.round(angleDiff))}° ${dir} Before 3/4 Advance`;
+                            currentSpeed = 0;
+                            currentAccel = 0;
+                            motionPhase = "TURNING";
+                        }
+                        // Phase 2: Actively moving 3/4th (75%) distance towards toNode
+                        else if (t < tStandoffArrival) {
+                            const advanceElapsed = Math.max(0, t - tTurnEnd);
+                            const kin34 = calculateKinematics(0.75 * distance, speedCmPerSec, accelTimeSec, decelTimeSec, advanceElapsed);
+                            const advanceProgress = Math.min(1, Math.max(0, kin34.progress));
+                            const progress = 0.75 * advanceProgress;
 
-                        const candidateX = fromNode.x + (toNode.x - fromNode.x) * progress;
-                        const candidateY = fromNode.y + (toNode.y - fromNode.y) * progress;
+                            const candidateX = fromNode.x + (toNode.x - fromNode.x) * progress;
+                            const candidateY = fromNode.y + (toNode.y - fromNode.y) * progress;
 
-                        // Pre-flight 50cm check on candidate position with priority resolution
-                        let candidateBlocked = false;
-                        let candidateInfo = null;
-                        for (let j = 0; j < prevVehicles.length; j++) {
-                            if (j === i) continue;
-                            const other = prevVehicles[j];
-                            const cdx = other.x - candidateX;
-                            const cdy = other.y - candidateY;
-                            const cdist = Math.hypot(cdx, cdy) * scaleCmPerPx;
-                            if (cdist <= 50.0) {
-                                const fwdDist = (cdx * fwdX + cdy * fwdY) * scaleCmPerPx;
-                                if (fwdDist < -2.0) {
-                                    continue;
-                                }
-                                if (other.status === "DESTINATION REACHED" && fwdDist > 0) {
-                                    candidateBlocked = true;
-                                    candidateInfo = { id: other.robotId, distCm: cdist, label: `Parked Robot R${other.robotId + 1}` };
-                                    break;
-                                }
-                                const otherHasPriority = other.robotId < veh.robotId;
-                                if (otherHasPriority) {
-                                    candidateBlocked = true;
-                                    candidateInfo = { id: other.robotId, distCm: cdist, label: `Priority Robot R${other.robotId + 1}` };
-                                    break;
+                            // Candidate proximity check
+                            let candidateBlocked = false;
+                            let candidateInfo = null;
+                            for (let j = 0; j < prevVehicles.length; j++) {
+                                if (j === i) continue;
+                                const other = prevVehicles[j];
+                                const otherSafetyDist = other.safetyDistanceCm || 50.0;
+                                const reqBuf = Math.max(vehSafetyDist, otherSafetyDist);
+                                const cdx = other.x - candidateX;
+                                const cdy = other.y - candidateY;
+                                const cdist = Math.hypot(cdx, cdy) * scaleCmPerPx;
+                                if (cdist <= reqBuf) {
+                                    const fwdDist = (cdx * fwdX + cdy * fwdY) * scaleCmPerPx;
+                                    if (fwdDist < -2.0) continue;
+                                    if (other.status === "DESTINATION REACHED" && fwdDist > 0) {
+                                        candidateBlocked = true;
+                                        candidateInfo = { id: other.robotId, distCm: cdist, reqBuf, label: `Parked Robot R${other.robotId + 1}` };
+                                        break;
+                                    }
+                                    if (other.robotId < veh.robotId) {
+                                        candidateBlocked = true;
+                                        candidateInfo = { id: other.robotId, distCm: cdist, reqBuf, label: `Priority Robot R${other.robotId + 1}` };
+                                        break;
+                                    }
                                 }
                             }
-                        }
 
-                        if (candidateBlocked) {
+                            if (candidateBlocked) {
+                                return {
+                                    ...veh,
+                                    x: veh.x,
+                                    y: veh.y,
+                                    delayAccumSec: delay + dt,
+                                    currentSpeed: 0,
+                                    currentAccel: 0,
+                                    motionPhase: "STOPPED",
+                                    status: `STOPPED (${Math.round(candidateInfo.reqBuf)}CM SAFETY DISTANCE)`,
+                                    turnStatus: `Yielding to ${candidateInfo.label} (${candidateInfo.distCm.toFixed(1)}cm) - Keeping ${Math.round(candidateInfo.reqBuf)}cm buffer`
+                                };
+                            }
+
+                            x = candidateX;
+                            y = candidateY;
+                            heading = segHeading;
+                            turningAngle = 0;
+                            currentSpeed = kin34.currentSpeed;
+                            currentAccel = kin34.currentAccel;
+                            motionPhase = kin34.motionPhase;
+                            status = "MOVING (3/4 ADVANCE)";
+                            turnStatus = `Advancing 75% Distance (${(advanceProgress * 75).toFixed(0)}%) to Standoff`;
+                        }
+                        // Phase 3: Holding at 75% standoff point until edge ahead clears AND scheduled release
+                        else if (t < tFinalDepart || isToNodeOccupiedAhead) {
+                            x = fromNode.x + (toNode.x - fromNode.x) * 0.75;
+                            y = fromNode.y + (toNode.y - fromNode.y) * 0.75;
+                            heading = segHeading;
+                            turningAngle = 0;
+                            currentSpeed = 0;
+                            currentAccel = 0;
+                            motionPhase = "STOPPED";
+                            status = "WAITING AT 3/4 STANDOFF";
+                            turnStatus = isToNodeOccupiedAhead
+                                ? `Holding 75% Standoff Buffer (${toNodeOccupiedInfo} Occupying ${toNode.label || toNodeId})`
+                                : "Holding 75% Standoff Buffer... Edge Ahead Occupied";
+
+                            if (t >= tFinalDepart && isToNodeOccupiedAhead) {
+                                return {
+                                    ...veh,
+                                    x,
+                                    y,
+                                    delayAccumSec: delay + dt,
+                                    heading,
+                                    turningAngle,
+                                    currentSpeed: 0,
+                                    currentAccel: 0,
+                                    motionPhase: "STOPPED",
+                                    status,
+                                    turnStatus,
+                                    fromNodeId,
+                                    toNodeId,
+                                    fromNodeLabel: fromNode.label || fromNode.id,
+                                    toNodeLabel: toNode.label || toNode.id,
+                                    segmentDistance: distance
+                                };
+                            }
+                        }
+                        // Phase 4: Final approach - covering remaining 25% distance into toNode
+                        else {
+                            const finalElapsed = Math.max(0, t - tFinalDepart);
+                            const kin25 = calculateKinematics(0.25 * distance, speedCmPerSec, accelTimeSec, decelTimeSec, finalElapsed);
+                            const finalProgress = Math.min(1, Math.max(0, kin25.progress));
+                            const progress = 0.75 + 0.25 * finalProgress;
+
+                            const candidateX = fromNode.x + (toNode.x - fromNode.x) * progress;
+                            const candidateY = fromNode.y + (toNode.y - fromNode.y) * progress;
+
+                            // Candidate proximity check
+                            let candidateBlocked = false;
+                            let candidateInfo = null;
+                            for (let j = 0; j < prevVehicles.length; j++) {
+                                if (j === i) continue;
+                                const other = prevVehicles[j];
+                                const otherSafetyDist = other.safetyDistanceCm || 50.0;
+                                const reqBuf = Math.max(vehSafetyDist, otherSafetyDist);
+                                const cdx = other.x - candidateX;
+                                const cdy = other.y - candidateY;
+                                const cdist = Math.hypot(cdx, cdy) * scaleCmPerPx;
+                                if (cdist <= reqBuf) {
+                                    const fwdDist = (cdx * fwdX + cdy * fwdY) * scaleCmPerPx;
+                                    if (fwdDist < -2.0) continue;
+                                    if (other.status === "DESTINATION REACHED" && fwdDist > 0) {
+                                        candidateBlocked = true;
+                                        candidateInfo = { id: other.robotId, distCm: cdist, reqBuf, label: `Parked Robot R${other.robotId + 1}` };
+                                        break;
+                                    }
+                                    if (other.robotId < veh.robotId) {
+                                        candidateBlocked = true;
+                                        candidateInfo = { id: other.robotId, distCm: cdist, reqBuf, label: `Priority Robot R${other.robotId + 1}` };
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (candidateBlocked) {
+                                return {
+                                    ...veh,
+                                    x: veh.x,
+                                    y: veh.y,
+                                    delayAccumSec: delay + dt,
+                                    currentSpeed: 0,
+                                    currentAccel: 0,
+                                    motionPhase: "STOPPED",
+                                    status: `STOPPED (${Math.round(candidateInfo.reqBuf)}CM SAFETY DISTANCE)`,
+                                    turnStatus: `Yielding to ${candidateInfo.label} (${candidateInfo.distCm.toFixed(1)}cm) - Keeping ${Math.round(candidateInfo.reqBuf)}cm buffer`
+                                };
+                            }
+
+                            x = candidateX;
+                            y = candidateY;
+                            heading = segHeading;
+                            turningAngle = 0;
+                            currentSpeed = kin25.currentSpeed;
+                            currentAccel = kin25.currentAccel;
+                            motionPhase = kin25.motionPhase;
+                            status = "FINAL APPROACH (LAST 25%)";
+                            turnStatus = `Entering ${toNode.label || toNodeId} - Final 25% approach`;
+                        }
+                    } else {
+                        // Standard Continuous Motion:
+                        if (t < tDepart) {
+                            let h = segHeading;
+                            let tAngle = 0;
+                            if (hasTurn) {
+                                const steerDuration = Math.min(turnDuration > 0 ? turnDuration : 0.8, 0.8);
+                                const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, steerDuration)));
+                                const turnEase = 0.5 - 0.5 * Math.cos(turnProgress * Math.PI);
+                                h = Math.round((prevHeading + angleDiff * turnEase + 360) % 360);
+                                tAngle = Math.abs(Math.round(angleDiff * (1 - turnProgress)));
+                            }
                             return {
                                 ...veh,
-                                x: veh.x,
-                                y: veh.y,
-                                delayAccumSec: delay + dt,
+                                x: fromNode.x,
+                                y: fromNode.y,
+                                heading: h,
+                                turningAngle: tAngle,
                                 currentSpeed: 0,
                                 currentAccel: 0,
                                 motionPhase: "STOPPED",
-                                status: "STOPPED (50CM SAFETY DISTANCE)",
-                                turnStatus: `Yielding to ${candidateInfo.label} (${candidateInfo.distCm.toFixed(1)}cm) - Will follow once clear`
+                                status: "WAITING AT NODE",
+                                turnStatus: `Holding at Node - Scheduled departure at ${tDepart.toFixed(2)}s`,
+                                fromNodeId,
+                                toNodeId,
+                                fromNodeLabel: fromNode.label || fromNode.id,
+                                toNodeLabel: toNode.label || toNode.id,
+                                segmentDistance: distance
                             };
                         }
 
-                        x = candidateX;
-                        y = candidateY;
-                        heading = segHeading;
-                        turningAngle = 0;
-                        currentSpeed = kin.currentSpeed * (kinSeg.totalTime / moveDuration);
-                        currentAccel = kin.currentAccel;
-                        motionPhase = kin.motionPhase;
-                        status = "MOVING";
-                        turnStatus = kin.motionPhase === "CRUISING"
-                            ? `Cruising at ${currentSpeed.toFixed(1)} cm/s`
-                            : (kin.motionPhase === "ACCELERATING"
-                                ? `Accelerating (+${kin.currentAccel.toFixed(1)} cm/s²)`
-                                : `Decelerating (${kin.currentAccel.toFixed(1)} cm/s²)`);
+                        if (hasTurn && t < tTurnEnd) {
+                            x = fromNode.x;
+                            y = fromNode.y;
+                            const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, turnDuration)));
+                            const turnEase = 0.5 - 0.5 * Math.cos(turnProgress * Math.PI);
+                            heading = Math.round((prevHeading + angleDiff * turnEase + 360) % 360);
+                            turningAngle = Math.abs(Math.round(angleDiff * (1 - turnProgress)));
+                            status = fromNode.type === "intersection" ? "TURNING AT INTERSECTION" : "TURNING AT NODE";
+                            turnStatus = `Turning ${Math.abs(Math.round(angleDiff))}° ${dir} (Tires Steering)`;
+                            currentSpeed = 0;
+                            currentAccel = 0;
+                            motionPhase = "TURNING";
+                        } else {
+                            const moveDuration = Math.max(0.001, tArrivalTo - tDepart);
+                            const moveElapsed = Math.max(0, t - tDepart);
+                            const effectiveElapsed = Math.min(kinSeg.totalTime, moveElapsed * (kinSeg.totalTime / moveDuration));
+                            const kin = calculateKinematics(distance, speedCmPerSec, accelTimeSec, decelTimeSec, effectiveElapsed);
+                            const progress = Math.min(1, Math.max(0, kin.progress));
+
+                            const candidateX = fromNode.x + (toNode.x - fromNode.x) * progress;
+                            const candidateY = fromNode.y + (toNode.y - fromNode.y) * progress;
+
+                            // Candidate proximity check
+                            let candidateBlocked = false;
+                            let candidateInfo = null;
+                            for (let j = 0; j < prevVehicles.length; j++) {
+                                if (j === i) continue;
+                                const other = prevVehicles[j];
+                                const otherSafetyDist = other.safetyDistanceCm || 50.0;
+                                const reqBuf = Math.max(vehSafetyDist, otherSafetyDist);
+                                const cdx = other.x - candidateX;
+                                const cdy = other.y - candidateY;
+                                const cdist = Math.hypot(cdx, cdy) * scaleCmPerPx;
+                                if (cdist <= reqBuf) {
+                                    const fwdDist = (cdx * fwdX + cdy * fwdY) * scaleCmPerPx;
+                                    if (fwdDist < -2.0) continue;
+                                    if (other.status === "DESTINATION REACHED" && fwdDist > 0) {
+                                        candidateBlocked = true;
+                                        candidateInfo = { id: other.robotId, distCm: cdist, reqBuf, label: `Parked Robot R${other.robotId + 1}` };
+                                        break;
+                                    }
+                                    const otherHasPriority = other.robotId < veh.robotId;
+                                    if (otherHasPriority) {
+                                        candidateBlocked = true;
+                                        candidateInfo = { id: other.robotId, distCm: cdist, reqBuf, label: `Priority Robot R${other.robotId + 1}` };
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (candidateBlocked) {
+                                return {
+                                    ...veh,
+                                    x: veh.x,
+                                    y: veh.y,
+                                    delayAccumSec: delay + dt,
+                                    currentSpeed: 0,
+                                    currentAccel: 0,
+                                    motionPhase: "STOPPED",
+                                    status: `STOPPED (${Math.round(candidateInfo.reqBuf)}CM SAFETY DISTANCE)`,
+                                    turnStatus: `Yielding to ${candidateInfo.label} (${candidateInfo.distCm.toFixed(1)}cm) - Keeping ${Math.round(candidateInfo.reqBuf)}cm buffer`
+                                };
+                            }
+
+                            x = candidateX;
+                            y = candidateY;
+                            heading = segHeading;
+                            turningAngle = 0;
+                            currentSpeed = kin.currentSpeed * (kinSeg.totalTime / moveDuration);
+                            currentAccel = kin.currentAccel;
+                            motionPhase = kin.motionPhase;
+                            status = "MOVING";
+                            turnStatus = kin.motionPhase === "CRUISING"
+                                ? `Cruising at ${currentSpeed.toFixed(1)} cm/s`
+                                : (kin.motionPhase === "ACCELERATING"
+                                    ? `Accelerating (+${kin.currentAccel.toFixed(1)} cm/s²)`
+                                    : `Decelerating (${kin.currentAccel.toFixed(1)} cm/s²)`);
+                        }
                     }
 
                     return {
@@ -1614,6 +1877,34 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                         />
                                     </div>
                                 </div>
+
+                                <div style={{ display: "flex", flexDirection: "column", gap: "3px", marginTop: "4px" }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                        <span style={{ fontSize: "10px", color: "#9CA3AF" }}>Keep Distance (cm)</span>
+                                        <span style={{ fontSize: "9px", color: "#3B82F6", fontWeight: 700 }}>
+                                            {route.safetyDistanceCm !== undefined ? route.safetyDistanceCm : 50} cm
+                                        </span>
+                                    </div>
+                                    <input
+                                        type="number"
+                                        min="5"
+                                        max="500"
+                                        step="5"
+                                        value={route.safetyDistanceCm !== undefined ? route.safetyDistanceCm : 50}
+                                        onChange={(e) => handleRouteChange(route.id, "safetyDistanceCm", parseFloat(e.target.value) || 50)}
+                                        style={{
+                                            background: "#070707",
+                                            border: "1px solid rgba(255, 255, 255, 0.1)",
+                                            borderRadius: "8px",
+                                            padding: "6px",
+                                            color: "#FFFFFF",
+                                            fontSize: "12px",
+                                            outline: "none",
+                                            width: "100%"
+                                        }}
+                                        title="Distance this robot keeps with other robots (cm)"
+                                    />
+                                </div>
                             </div>
                         ))}
                     </div>
@@ -1848,6 +2139,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 const toNode = nodes.find(n => n.id === edge.to);
                                 if (!fromNode || !toNode) return null;
 
+                                const isEdgeOccupied = isSimulating && (occupiedEdgeSet.has(`${edge.from}_${edge.to}`) || occupiedEdgeSet.has(`${edge.to}_${edge.from}`));
+
                                 return (
                                     <g key={edge.id}>
                                         <line
@@ -1855,8 +2148,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                             y1={fromNode.y}
                                             x2={toNode.x}
                                             y2={toNode.y}
-                                            stroke="rgba(255, 255, 255, 0.08)"
-                                            strokeWidth="3.5"
+                                            stroke={isEdgeOccupied ? "rgba(239, 68, 68, 0.45)" : "rgba(255, 255, 255, 0.08)"}
+                                            strokeWidth={isEdgeOccupied ? "5" : "3.5"}
                                             strokeLinecap="round"
                                         />
 
@@ -1865,10 +2158,11 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                             y1={fromNode.y}
                                             x2={toNode.x}
                                             y2={toNode.y}
-                                            stroke="rgba(255, 255, 255, 0.15)"
-                                            strokeWidth="1.5"
+                                            stroke={isEdgeOccupied ? "#EF4444" : "rgba(255, 255, 255, 0.15)"}
+                                            strokeWidth={isEdgeOccupied ? "2.5" : "1.5"}
                                             markerEnd="url(#arrow)"
                                             strokeLinecap="round"
+                                            strokeDasharray={isEdgeOccupied ? "6 4" : "none"}
                                         />
 
                                         {/* Distance Badge */}
@@ -1889,7 +2183,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                                         height="16"
                                                         rx="4"
                                                         fill="rgba(7, 7, 7, 0.85)"
-                                                        stroke="rgba(255, 255, 255, 0.12)"
+                                                        stroke={isEdgeOccupied ? "#EF4444" : "rgba(255, 255, 255, 0.12)"}
                                                         strokeWidth="1"
                                                     />
                                                     <text
@@ -1899,7 +2193,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                                         fontWeight="700"
                                                         fill="#FFFFFF"
                                                     >
-                                                        <tspan fill="#3B82F6">{dist.toFixed(0)}cm</tspan>
+                                                        <tspan fill={isEdgeOccupied ? "#F87171" : "#3B82F6"}>{dist.toFixed(0)}cm</tspan>
                                                     </text>
                                                 </g>
                                             );
@@ -1911,36 +2205,74 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             {/* Node Elements */}
                             {nodes.map(node => {
                                 const rgbColor = getNodeColor(node.type);
+                                const isOccupied = isSimulating && occupiedNodesMap.has(node.id);
 
                                 return (
                                     <g
                                         key={node.id}
                                         transform={`translate(${node.x}, ${node.y})`}
                                     >
+                                        {/* Occupied Pulse Animation Ring */}
+                                        {isOccupied && (
+                                            <circle
+                                                r="28"
+                                                fill="none"
+                                                stroke="#EF4444"
+                                                strokeWidth="2.5"
+                                                strokeDasharray="4 3"
+                                                opacity="0.9"
+                                            />
+                                        )}
+
                                         <circle
                                             r="20"
-                                            fill="#070707"
-                                            stroke={`rgba(${rgbColor}, 0.25)`}
-                                            strokeWidth="1.5"
+                                            fill={isOccupied ? "rgba(239, 68, 68, 0.25)" : "#070707"}
+                                            stroke={isOccupied ? "#EF4444" : `rgba(${rgbColor}, 0.25)`}
+                                            strokeWidth={isOccupied ? "2.5" : "1.5"}
                                         />
 
                                         <circle
                                             r="18"
-                                            fill={`rgba(${rgbColor}, 0.08)`}
-                                            stroke={`rgba(${rgbColor}, 0.65)`}
+                                            fill={isOccupied ? "rgba(239, 68, 68, 0.15)" : `rgba(${rgbColor}, 0.08)`}
+                                            stroke={isOccupied ? "#F87171" : `rgba(${rgbColor}, 0.65)`}
                                             strokeWidth="1.5"
                                         />
 
                                         <text
                                             textAnchor="middle"
                                             dy=".3em"
-                                            fill="#FFFFFF"
+                                            fill={isOccupied ? "#FCA5A5" : "#FFFFFF"}
                                             fontSize="11px"
                                             fontWeight="700"
                                             style={{ userSelect: "none" }}
                                         >
                                             {node.label}
                                         </text>
+
+                                        {/* Occupied Badge above Node */}
+                                        {isOccupied && (
+                                            <g transform="translate(0, -28)">
+                                                <rect
+                                                    x="-26"
+                                                    y="-7"
+                                                    width="52"
+                                                    height="13"
+                                                    rx="3"
+                                                    fill="#DC2626"
+                                                    opacity="0.95"
+                                                />
+                                                <text
+                                                    x="0"
+                                                    y="2"
+                                                    textAnchor="middle"
+                                                    fontSize="7px"
+                                                    fontWeight="800"
+                                                    fill="#FFFFFF"
+                                                >
+                                                    OCCUPIED
+                                                </text>
+                                            </g>
+                                        )}
                                     </g>
                                 );
                             })}
@@ -1961,8 +2293,21 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                             opacity="0.9"
                                         />
                                     )}
-                                    {/* 50cm Safety Buffer Ring */}
-                                    {vehicle.status?.includes("50CM") && (
+                                    {/* 3/4 Standoff Ring */}
+                                    {vehicle.status?.includes("STANDOFF") && (
+                                        <circle
+                                            cx={vehicle.x}
+                                            cy={vehicle.y}
+                                            r="18"
+                                            fill="rgba(245, 158, 11, 0.12)"
+                                            stroke="#F59E0B"
+                                            strokeWidth="1.8"
+                                            strokeDasharray="4 3"
+                                            opacity="0.95"
+                                        />
+                                    )}
+                                    {/* Safety Buffer Ring */}
+                                    {(vehicle.status?.includes("SAFETY") || vehicle.status?.includes("50CM")) && (
                                         <circle
                                             cx={vehicle.x}
                                             cy={vehicle.y}
@@ -1987,7 +2332,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                         cy={vehicle.y}
                                         r="6.5"
                                         fill={vehicle.color}
-                                        stroke={vehicle.status?.includes("OCCUPIED") ? "#EF4444" : (vehicle.status?.includes("50CM") ? "#F59E0B" : "#FFFFFF")}
+                                        stroke={vehicle.status?.includes("OCCUPIED") ? "#EF4444" : (vehicle.status?.includes("STANDOFF") ? "#F59E0B" : ((vehicle.status?.includes("SAFETY") || vehicle.status?.includes("50CM")) ? "#F59E0B" : "#FFFFFF"))}
                                         strokeWidth="1.5"
                                     />
                                     {/* Edge Occupied Badge */}
@@ -2014,8 +2359,32 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                             </text>
                                         </g>
                                     )}
-                                    {/* 50cm Safety Buffer Badge */}
-                                    {vehicle.status?.includes("50CM") && (
+                                    {/* 3/4 Standoff Badge */}
+                                    {vehicle.status?.includes("STANDOFF") && (
+                                        <g transform={`translate(${vehicle.x}, ${vehicle.y - 14})`}>
+                                            <rect
+                                                x="-32"
+                                                y="-7"
+                                                width="64"
+                                                height="11"
+                                                rx="3"
+                                                fill="#D97706"
+                                                opacity="0.95"
+                                            />
+                                            <text
+                                                x="0"
+                                                y="1"
+                                                textAnchor="middle"
+                                                fontSize="7px"
+                                                fontWeight="700"
+                                                fill="#FFFFFF"
+                                            >
+                                                3/4 Standoff
+                                            </text>
+                                        </g>
+                                    )}
+                                    {/* Safety Buffer Badge */}
+                                    {(vehicle.status?.includes("SAFETY") || vehicle.status?.includes("50CM")) && !vehicle.status?.includes("STANDOFF") && (
                                         <g transform={`translate(${vehicle.x}, ${vehicle.y - 14})`}>
                                             <rect
                                                 x="-34"
@@ -2034,10 +2403,11 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                                 fontWeight="700"
                                                 fill="#FFFFFF"
                                             >
-                                                50cm Buffer
+                                                {`${Math.round(vehicle.safetyDistanceCm || 50)}cm Buffer`}
                                             </text>
                                         </g>
                                     )}
+
                                     {/* Live Speed Badge */}
                                     <g transform={`translate(${vehicle.x}, ${vehicle.y + 13})`}>
                                         <rect

@@ -350,4 +350,41 @@ public class RobotPathPlannerServiceTest {
         assertEquals(0.0, instructions.get(5).angleDegrees, 0.01);
         assertEquals(0.0, instructions.get(5).speedCmPerSec);
     }
+
+    @Test
+    void testCustomSafetyDistanceAndResponse() throws Exception {
+        String canvasData = "{"
+            + "\"nodes\": ["
+            + "  {\"id\": \"L1\", \"label\": \"L1\", \"type\": \"loading\"},"
+            + "  {\"id\": \"U1\", \"label\": \"U1\", \"type\": \"unloading\"}"
+            + "],"
+            + "\"edges\": ["
+            + "  {\"id\": \"e1\", \"from\": \"L1\", \"to\": \"U1\", \"distance\": 100.0}"
+            + "]"
+            + "}";
+
+        MapPlot plot = new MapPlot();
+        plot.setId(20L);
+        plot.setKeyId("safety-dist-key");
+        plot.setPlotName("Safety Dist Plot");
+
+        GraphReo graphReo = new GraphReo();
+        graphReo.setPlotId(20L);
+        graphReo.setCanvasData(canvasData);
+
+        when(mapPlotRepository.findByKeyId("safety-dist-key")).thenReturn(Optional.of(plot));
+        when(graphReoRepository.findById(20L)).thenReturn(Optional.of(graphReo));
+
+        RobotRequest req = new RobotRequest();
+        req.id = 0;
+        req.startNodeId = "L1";
+        req.endNodeId = "U1";
+        req.speedCmPerSec = 50.0;
+        req.safetyDistanceCm = 75.0;
+
+        List<RobotResponse> responses = plannerService.planRoutes("safety-dist-key", Collections.singletonList(req));
+        assertNotNull(responses);
+        assertEquals(1, responses.size());
+        assertEquals(75.0, responses.get(0).safetyDistanceCm, 0.01);
+    }
 }

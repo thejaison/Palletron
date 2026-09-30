@@ -83,6 +83,39 @@ export default function SchematicSimulation({
         }
     }, [activeLogs, isTerminalCollapsed]);
 
+    // Compute currently occupied edges and their connecting terminal nodes
+    const { occupiedNodesMap, occupiedEdgeSet } = useMemo(() => {
+        const nodeMap = new Map();
+        const edgeSet = new Set();
+
+        vehicles.forEach(v => {
+            if (!v || v.status === "DESTINATION REACHED" || v.status === "IDLE" || !v.fromNodeId || !v.toNodeId) {
+                return;
+            }
+            const isTraversing = v.motionPhase !== "STOPPED" || 
+                                 v.status?.includes("STANDOFF") || 
+                                 v.status?.includes("MOVING") || 
+                                 v.status?.includes("TURNING") || 
+                                 v.status?.includes("APPROACH") ||
+                                 v.status?.includes("SAFETY");
+
+            if (isTraversing) {
+                const pair1 = `${v.fromNodeId}_${v.toNodeId}`;
+                const pair2 = `${v.toNodeId}_${v.fromNodeId}`;
+                edgeSet.add(pair1);
+                edgeSet.add(pair2);
+
+                if (!nodeMap.has(v.fromNodeId)) nodeMap.set(v.fromNodeId, []);
+                nodeMap.get(v.fromNodeId).push(v);
+
+                if (!nodeMap.has(v.toNodeId)) nodeMap.set(v.toNodeId, []);
+                nodeMap.get(v.toNodeId).push(v);
+            }
+        });
+
+        return { occupiedNodesMap: nodeMap, occupiedEdgeSet: edgeSet };
+    }, [vehicles]);
+
     // Coordinate conversion helper: client coordinates -> SVG canvas coordinates
     const getSVGCoords = (e) => {
         if (!svgRef.current) return { x: 0, y: 0 };
@@ -640,6 +673,7 @@ export default function SchematicSimulation({
                                     if (renderedPairs.has(pairKey)) return null;
                                     renderedPairs.add(pairKey);
 
+                                    const isEdgeOccupied = isSimulating && (occupiedEdgeSet.has(`${edge.from}_${edge.to}`) || occupiedEdgeSet.has(`${edge.to}_${edge.from}`));
                                     const midX = (fromNode.x + toNode.x) / 2;
                                     const midY = (fromNode.y + toNode.y) / 2;
                                     const dist = edge.distance !== undefined ? edge.distance : 1000;
@@ -652,9 +686,9 @@ export default function SchematicSimulation({
                                                 y1={fromNode.y}
                                                 x2={toNode.x}
                                                 y2={toNode.y}
-                                                stroke="#1F2937"
-                                                strokeWidth="2.5"
-                                                strokeDasharray="5 5"
+                                                stroke={isEdgeOccupied ? "#EF4444" : "#1F2937"}
+                                                strokeWidth={isEdgeOccupied ? "3.5" : "2.5"}
+                                                strokeDasharray={isEdgeOccupied ? "6 4" : "5 5"}
                                                 strokeLinecap="round"
                                             />
 
@@ -785,7 +819,8 @@ export default function SchematicSimulation({
                             {/* 3. GRAPH NODES (Green Source, Yellow Intersection, Red Unload)   */}
                             {/* ================================================================= */}
                             {nodes.map(node => {
-                                const ringColor = getNodeRingColor(node.type);
+                                const isOccupied = isSimulating && occupiedNodesMap.has(node.id);
+                                const ringColor = isOccupied ? "#EF4444" : getNodeRingColor(node.type);
                                 const isSelected = node.id === selectedNodeId;
                                 const isBeingDragged = node.id === draggingNodeId;
 
@@ -797,7 +832,7 @@ export default function SchematicSimulation({
                                         filter="url(#node-shadow)"
                                         style={{ cursor: isBeingDragged ? "grabbing" : "grab" }}
                                     >
-                                        <title>{node.label} ({node.type}) - Click & drag to move</title>
+                                        <title>{node.label} ({node.type}){isOccupied ? " - OCCUPIED (Connecting Edge Active)" : ""} - Click & drag to move</title>
 
                                         {/* Focus ring if selected */}
                                         {isSelected && (
@@ -809,19 +844,29 @@ export default function SchematicSimulation({
                                                 strokeDasharray="4 3"
                                             />
                                         )}
+                                        {/* Occupied Pulse Animation Ring */}
+                                        {isOccupied && !isSelected && (
+                                            <circle
+                                                r="34"
+                                                fill="none"
+                                                stroke="#EF4444"
+                                                strokeWidth="2.5"
+                                                strokeDasharray="4 3"
+                                            />
+                                        )}
 
                                         {/* Outer Colored Ring */}
                                         <circle
                                             r="26"
-                                            fill="#FFFFFF"
+                                            fill={isOccupied ? "#FEE2E2" : "#FFFFFF"}
                                             stroke={ringColor}
                                             strokeWidth="5"
                                         />
 
-                                        {/* Inner White Center */}
+                                        {/* Inner Center */}
                                         <circle
                                             r="20"
-                                            fill="#FFFFFF"
+                                            fill={isOccupied ? "#FEF2F2" : "#FFFFFF"}
                                         />
 
                                         {/* Node Label Text */}
@@ -830,12 +875,38 @@ export default function SchematicSimulation({
                                             dy=".35em"
                                             fontSize="13px"
                                             fontWeight="800"
-                                            fill="#1F2937"
+                                            fill={isOccupied ? "#991B1B" : "#1F2937"}
                                             fontFamily="'Outfit', sans-serif"
                                             style={{ userSelect: "none" }}
                                         >
                                             {node.label || node.id}
                                         </text>
+
+                                        {/* Occupied Badge above Node */}
+                                        {isOccupied && (
+                                            <g transform="translate(0, -34)">
+                                                <rect
+                                                    x="-26"
+                                                    y="-8"
+                                                    width="52"
+                                                    height="15"
+                                                    rx="4"
+                                                    fill="#DC2626"
+                                                    filter="url(#badge-shadow)"
+                                                />
+                                                <text
+                                                    x="0"
+                                                    y="3"
+                                                    textAnchor="middle"
+                                                    fontSize="8px"
+                                                    fontWeight="800"
+                                                    fill="#FFFFFF"
+                                                    fontFamily="'Outfit', sans-serif"
+                                                >
+                                                    OCCUPIED
+                                                </text>
+                                            </g>
+                                        )}
                                     </g>
                                 );
                             })}
@@ -870,8 +941,22 @@ export default function SchematicSimulation({
                                             />
                                         )}
 
-                                        {/* 50cm Safety Buffer Indicator Ring */}
-                                        {(veh.status?.includes("50CM") || veh.status?.includes("SAFETY") || veh.status?.includes("STANDOFF")) && (
+                                        {/* 3/4 Standoff Indicator Ring */}
+                                        {veh.status?.includes("STANDOFF") && (
+                                            <circle
+                                                cx={veh.x}
+                                                cy={veh.y}
+                                                r="20"
+                                                fill="rgba(245, 158, 11, 0.12)"
+                                                stroke="#F59E0B"
+                                                strokeWidth="2"
+                                                strokeDasharray="4 3"
+                                                opacity="0.95"
+                                            />
+                                        )}
+
+                                        {/* Safety Buffer Indicator Ring */}
+                                        {(veh.status?.includes("50CM") || veh.status?.includes("SAFETY")) && !veh.status?.includes("STANDOFF") && (
                                             <circle
                                                 cx={veh.x}
                                                 cy={veh.y}
@@ -934,7 +1019,11 @@ export default function SchematicSimulation({
                                             >
                                                 {veh.status?.includes("OCCUPIED")
                                                     ? `R${idx + 1} (Edge Occupied)`
-                                                    : ((veh.status?.includes("50CM") || veh.status?.includes("SAFETY") || veh.status?.includes("STANDOFF")) ? `R${idx + 1} (50cm Buffer)` : `R${idx + 1} ${turningAngle > 0 ? `(${turningAngle}°)` : ""}`)}
+                                                    : (veh.status?.includes("STANDOFF")
+                                                        ? `R${idx + 1} (3/4 Standoff)`
+                                                        : ((veh.status?.includes("50CM") || veh.status?.includes("SAFETY"))
+                                                            ? `R${idx + 1} (${Math.round(veh.safetyDistanceCm || 50)}cm Buffer)`
+                                                            : `R${idx + 1} ${turningAngle > 0 ? `(${turningAngle}°)` : ""}`))}
                                             </text>
                                         </g>
 
@@ -1205,6 +1294,9 @@ export default function SchematicSimulation({
                                                 Route: <strong>{startNode?.label || "L1"}</strong> ➔ <strong>{endNode?.label || "U1"}</strong>
                                                 <span style={{ marginLeft: "6px" }}>
                                                     Target: <strong>{route.speedCmPerSec || 50} cm/s</strong>
+                                                </span>
+                                                <span style={{ marginLeft: "6px", color: "#3B82F6", fontWeight: 700 }}>
+                                                    Keep Dist: <strong>{route.safetyDistanceCm !== undefined ? route.safetyDistanceCm : 50}cm</strong>
                                                 </span>
                                             </div>
 
