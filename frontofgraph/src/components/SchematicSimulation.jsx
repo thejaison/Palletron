@@ -89,9 +89,27 @@ export default function SchematicSimulation({
         const edgeSet = new Set();
 
         vehicles.forEach(v => {
-            if (!v || v.status === "DESTINATION REACHED" || v.status === "IDLE" || !v.fromNodeId || !v.toNodeId) {
+            if (!v || v.status === "IDLE") {
                 return;
             }
+            if (v.status === "DESTINATION REACHED") {
+                const destId = v.scheduleNodes ? v.scheduleNodes[v.scheduleNodes.length - 1] : v.toNodeId;
+                if (destId) {
+                    if (!nodeMap.has(destId)) nodeMap.set(destId, []);
+                    nodeMap.get(destId).push(v);
+                }
+                return;
+            }
+            if (v.status === "WAITING AT START NODE") {
+                const startId = v.scheduleNodes ? v.scheduleNodes[0] : v.fromNodeId;
+                if (startId) {
+                    if (!nodeMap.has(startId)) nodeMap.set(startId, []);
+                    nodeMap.get(startId).push(v);
+                }
+                return;
+            }
+            if (!v.fromNodeId || !v.toNodeId) return;
+
             const isTraversing = v.motionPhase !== "STOPPED" || 
                                  v.status?.includes("STANDOFF") || 
                                  v.status?.includes("MOVING") || 
@@ -105,11 +123,26 @@ export default function SchematicSimulation({
                 edgeSet.add(pair1);
                 edgeSet.add(pair2);
 
-                if (!nodeMap.has(v.fromNodeId)) nodeMap.set(v.fromNodeId, []);
-                nodeMap.get(v.fromNodeId).push(v);
+                // A robot covering 3/4th of the path (or holding at 3/4 standoff) occupies the edge only,
+                // NOT the connecting vertices! Only mark a vertex occupied if the robot is physically at it.
+                const isHoldingStandoff = v.status?.includes("STANDOFF") || 
+                    (v.segmentProgress !== undefined && Math.abs(v.segmentProgress - 0.75) < 0.05);
 
-                if (!nodeMap.has(v.toNodeId)) nodeMap.set(v.toNodeId, []);
-                nodeMap.get(v.toNodeId).push(v);
+                const isAtFromNode = !isHoldingStandoff && (
+                    v.status?.includes("TURNING") || 
+                    v.status?.includes("WAITING AT NODE") || 
+                    (v.segmentProgress !== undefined && v.segmentProgress < 0.08)
+                );
+                if (isAtFromNode) {
+                    if (!nodeMap.has(v.fromNodeId)) nodeMap.set(v.fromNodeId, []);
+                    nodeMap.get(v.fromNodeId).push(v);
+                }
+
+                const isAtToNode = (v.segmentProgress !== undefined && v.segmentProgress >= 0.95);
+                if (isAtToNode) {
+                    if (!nodeMap.has(v.toNodeId)) nodeMap.set(v.toNodeId, []);
+                    nodeMap.get(v.toNodeId).push(v);
+                }
             }
         });
 

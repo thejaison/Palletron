@@ -555,9 +555,27 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
         const edgeSet = new Set();
 
         vehicles.forEach(v => {
-            if (!v || v.status === "DESTINATION REACHED" || v.status === "IDLE" || !v.fromNodeId || !v.toNodeId) {
+            if (!v || v.status === "IDLE") {
                 return;
             }
+            if (v.status === "DESTINATION REACHED") {
+                const destId = v.scheduleNodes ? v.scheduleNodes[v.scheduleNodes.length - 1] : v.toNodeId;
+                if (destId) {
+                    if (!nodeMap.has(destId)) nodeMap.set(destId, []);
+                    nodeMap.get(destId).push(v);
+                }
+                return;
+            }
+            if (v.status === "WAITING AT START NODE") {
+                const startId = v.scheduleNodes ? v.scheduleNodes[0] : v.fromNodeId;
+                if (startId) {
+                    if (!nodeMap.has(startId)) nodeMap.set(startId, []);
+                    nodeMap.get(startId).push(v);
+                }
+                return;
+            }
+            if (!v.fromNodeId || !v.toNodeId) return;
+
             // A vehicle actively occupies an edge if it is traversing (moving, turning, cruising, 3/4 standoff, or safety buffer)
             const isTraversing = v.motionPhase !== "STOPPED" || 
                                  v.status?.includes("STANDOFF") || 
@@ -572,11 +590,26 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                 edgeSet.add(pair1);
                 edgeSet.add(pair2);
 
-                if (!nodeMap.has(v.fromNodeId)) nodeMap.set(v.fromNodeId, []);
-                nodeMap.get(v.fromNodeId).push(v);
+                // A robot covering 3/4th of the path (or holding at 3/4 standoff) occupies the edge only,
+                // NOT the connecting vertices! Only mark a vertex occupied if the robot is physically at it.
+                const isHoldingStandoff = v.status?.includes("STANDOFF") || 
+                    (v.segmentProgress !== undefined && Math.abs(v.segmentProgress - 0.75) < 0.05);
 
-                if (!nodeMap.has(v.toNodeId)) nodeMap.set(v.toNodeId, []);
-                nodeMap.get(v.toNodeId).push(v);
+                const isAtFromNode = !isHoldingStandoff && (
+                    v.status?.includes("TURNING") || 
+                    v.status?.includes("WAITING AT NODE") || 
+                    (v.segmentProgress !== undefined && v.segmentProgress < 0.08)
+                );
+                if (isAtFromNode) {
+                    if (!nodeMap.has(v.fromNodeId)) nodeMap.set(v.fromNodeId, []);
+                    nodeMap.get(v.fromNodeId).push(v);
+                }
+
+                const isAtToNode = (v.segmentProgress !== undefined && v.segmentProgress >= 0.95);
+                if (isAtToNode) {
+                    if (!nodeMap.has(v.toNodeId)) nodeMap.set(v.toNodeId, []);
+                    nodeMap.get(v.toNodeId).push(v);
+                }
             }
         });
 
@@ -701,13 +734,21 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                 const startNode = nodes.find(n => n.id === route.startNodeId) || loadingNodes[i % loadingNodes.length];
                 const endNode = nodes.find(n => n.id === route.endNodeId) || unloadingNodes[0];
 
+                const speed = route.speedCmPerSec || 50;
+                const accelTime = route.accelTimeSec !== undefined ? Number(route.accelTimeSec) : 1.0;
+                const decelTime = route.decelTimeSec !== undefined ? Number(route.decelTimeSec) : 1.0;
+                const accel = speed / Math.max(0.01, accelTime);
+                const decel = speed / Math.max(0.01, decelTime);
+
                 robotRequests.push({
                     id: i,
                     startNodeId: startNode.id,
                     endNodeId: endNode.id,
-                    speedCmPerSec: route.speedCmPerSec || 50,
-                    accelTimeSec: route.accelTimeSec !== undefined ? Number(route.accelTimeSec) : 1.0,
-                    decelTimeSec: route.decelTimeSec !== undefined ? Number(route.decelTimeSec) : 1.0,
+                    speedCmPerSec: speed,
+                    accelTimeSec: accelTime,
+                    decelTimeSec: decelTime,
+                    accelerationCmPerSec2: accel,
+                    decelerationCmPerSec2: decel,
                     safetyDistanceCm: route.safetyDistanceCm !== undefined ? Number(route.safetyDistanceCm) : 50.0
                 });
             }
@@ -763,6 +804,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         path: p.path,
                         scheduleNodes: p.scheduleNodes,
                         scheduleTimes: p.scheduleTimes,
+                        currentSegmentIndex: 0,
+                        segmentProgress: 0,
                         speedCmPerSec: req.speedCmPerSec || 50,
                         accelTimeSec: req.accelTimeSec !== undefined ? req.accelTimeSec : 1.0,
                         decelTimeSec: req.decelTimeSec !== undefined ? req.decelTimeSec : 1.0,
@@ -861,10 +904,28 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
 
                     const delay = veh.delayAccumSec || 0;
                     const t = Math.max(0, globalElapsed - delay);
-                    const safetyDist = veh.safetyDistanceCm !== undefined ? Number(veh.safetyDistanceCm) : 50.0;
+                    const vehSafetyDist = veh.safetyDistanceCm !== undefined ? Number(veh.safetyDistanceCm) : 50.0;
+
+                    // Physical segment index tracking
+                    const k = veh.currentSegmentIndex !== undefined ? veh.currentSegmentIndex : 0;
+                    if (k >= scheduleNodes.length - 1) {
+                        const endNode = nodes.find(n => n.id === scheduleNodes[scheduleNodes.length - 1]);
+                        return {
+                            ...veh,
+                            x: endNode ? endNode.x : veh.x,
+                            y: endNode ? endNode.y : veh.y,
+                            status: "DESTINATION REACHED",
+                            turnStatus: "Parked at Destination",
+                            currentSpeed: 0,
+                            currentAccel: 0,
+                            motionPhase: "STOPPED",
+                            currentSegmentIndex: scheduleNodes.length - 1,
+                            segmentProgress: 1.0
+                        };
+                    }
 
                     // If robot hasn't reached scheduled departure at start node, check staging
-                    if (scheduleTimes.length > 0 && t < scheduleTimes[0]) {
+                    if (k === 0 && scheduleTimes.length > 0 && t < scheduleTimes[0]) {
                         const startNode = nodes.find(n => n.id === scheduleNodes[0]);
                         let blockedAtStart = false;
                         let blkInfo = null;
@@ -874,7 +935,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             const other = prevVehicles[j];
                             const sDist = Math.hypot(other.x - (startNode ? startNode.x : veh.x), other.y - (startNode ? startNode.y : veh.y)) * defaultScale;
                             const otherSafety = other.safetyDistanceCm !== undefined ? Number(other.safetyDistanceCm) : 50.0;
-                            const requiredBuffer = Math.max(safetyDist, otherSafety);
+                            const requiredBuffer = Math.max(vehSafetyDist, otherSafety);
                             if (sDist <= requiredBuffer) {
                                 blockedAtStart = true;
                                 blkInfo = { id: other.robotId, dist: sDist, req: requiredBuffer };
@@ -892,7 +953,9 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 turnStatus: `Safety Stop: Robot ${blkInfo.id + 1} within ${Math.round(blkInfo.req)}cm (${blkInfo.dist.toFixed(1)}cm)`,
                                 currentSpeed: 0,
                                 currentAccel: 0,
-                                motionPhase: "STOPPED"
+                                motionPhase: "STOPPED",
+                                currentSegmentIndex: 0,
+                                segmentProgress: 0
                             };
                         }
 
@@ -909,31 +972,9 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             toNodeId: scheduleNodes.length > 1 ? scheduleNodes[1] : scheduleNodes[0],
                             fromNodeLabel: startNode?.label || scheduleNodes[0],
                             toNodeLabel: scheduleNodes.length > 1 ? (nodes.find(n => n.id === scheduleNodes[1])?.label || scheduleNodes[1]) : "",
-                            segmentDistance: 0
-                        };
-                    }
-
-                    // Find which segment we are currently in
-                    let k = 0;
-                    for (let idx = 0; idx < scheduleTimes.length - 1; idx++) {
-                        if (t >= scheduleTimes[idx] && t < scheduleTimes[idx + 1]) {
-                            k = idx;
-                            break;
-                        }
-                    }
-
-                    const finalTime = scheduleTimes[scheduleTimes.length - 1];
-                    if (t >= finalTime) {
-                        const endNode = nodes.find(n => n.id === scheduleNodes[scheduleNodes.length - 1]);
-                        return {
-                            ...veh,
-                            x: endNode ? endNode.x : veh.x,
-                            y: endNode ? endNode.y : veh.y,
-                            status: "DESTINATION REACHED",
-                            turnStatus: "Parked at Destination",
-                            currentSpeed: 0,
-                            currentAccel: 0,
-                            motionPhase: "STOPPED"
+                            segmentDistance: 0,
+                            currentSegmentIndex: 0,
+                            segmentProgress: 0
                         };
                     }
 
@@ -981,9 +1022,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     const turnDuration = hasTurn ? Math.min(desiredTurnTime, maxTurnTime) : 0;
                     const dir = angleDiff > 0 ? "Counter-Clockwise (Left)" : "Clockwise (Right)";
 
-                    const fixedTurnDuration = hasTurn ? Math.min(desiredTurnTime, 0.8) : 0;
-                    const tTurnEnd = tArrivalFrom + fixedTurnDuration;
-                    const minStepTime = fixedTurnDuration + travelTime;
+                    const tTurnEnd = tArrivalFrom + turnDuration;
+                    const minStepTime = turnDuration + travelTime;
 
                     // 3/4th Advance Kinematics:
                     const kin75 = calculateKinematics(0.75 * distance, speedCmPerSec, accelTimeSec, decelTimeSec, 0);
@@ -997,8 +1037,6 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     // Departure time if continuous without standoff:
                     const tDepart = Math.max(tTurnEnd, tArrivalTo - travelTime);
 
-                    const vehSafetyDist = veh.safetyDistanceCm !== undefined ? veh.safetyDistanceCm : 50.0;
-
                     // =========================================================
                     // 1. HARD PROXIMITY CHECK (CONFIGURABLE SAFETY DISTANCE) WITH PRIORITY RESOLUTION
                     // =========================================================
@@ -1008,7 +1046,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     for (let j = 0; j < prevVehicles.length; j++) {
                         if (j === i) continue;
                         const other = prevVehicles[j];
-                        const otherSafetyDist = other.safetyDistanceCm !== undefined ? other.safetyDistanceCm : 50.0;
+                        const otherSafetyDist = other.safetyDistanceCm !== undefined ? Number(other.safetyDistanceCm) : 50.0;
                         const requiredBuffer = Math.max(vehSafetyDist, otherSafetyDist);
 
                         const dx = other.x - veh.x;
@@ -1022,6 +1060,15 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
 
                             // A vehicle NEVER stops for a vehicle that is behind it!
                             if (distForwardCm < -2.0) {
+                                continue;
+                            }
+
+                            // If other vehicle is holding at 3/4 standoff on a different branch,
+                            // it has yielded and stopped on its own edge. It does not block this vehicle!
+                            const otherHoldingStandoffOnOtherEdge = 
+                                (other.status?.includes("STANDOFF") || (other.segmentProgress !== undefined && Math.abs(other.segmentProgress - 0.75) < 0.05)) &&
+                                (other.fromNodeId !== fromNodeId || other.toNodeId !== toNodeId);
+                            if (otherHoldingStandoffOnOtherEdge) {
                                 continue;
                             }
 
@@ -1063,15 +1110,17 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             currentAccel: 0,
                             motionPhase: "STOPPED",
                             status: `STOPPED (${Math.round(blockDetails.requiredBuffer)}CM SAFETY DISTANCE)`,
-                            turnStatus: `Yielding to ${blockDetails.label} (${blockDetails.distCm.toFixed(1)}cm) - Keeping ${Math.round(blockDetails.requiredBuffer)}cm buffer`
+                            turnStatus: `Yielding to ${blockDetails.label} (${blockDetails.distCm.toFixed(1)}cm) - Keeping ${Math.round(blockDetails.requiredBuffer)}cm buffer`,
+                            currentSegmentIndex: k,
+                            segmentProgress: veh.segmentProgress || 0
                         };
                     }
 
                     // =========================================================
-                    // 2. CHECK IF CURRENT EDGE (fromNode -> toNode) IS OCCUPIED
+                    // 2. CHECK IF CURRENT EDGE (fromNode -> toNode) IS OCCUPIED AHEAD
                     // =========================================================
                     const distFromFromNode = Math.hypot(veh.x - fromNode.x, veh.y - fromNode.y) * scaleCmPerPx;
-                    const isAtOriginNode = distFromFromNode < 12.0 || t < tDepart;
+                    const isPhysicallyAtOrigin = distFromFromNode < 5.0 && (veh.segmentProgress === undefined || veh.segmentProgress < 0.05);
 
                     let isCurrentEdgeOccupied = false;
                     let currentEdgeBlocker = "";
@@ -1106,7 +1155,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         }
                     }
 
-                    if (isCurrentEdgeOccupied && isAtOriginNode) {
+                    if (isCurrentEdgeOccupied && isPhysicallyAtOrigin && t < tDepart) {
                         return {
                             ...veh,
                             x: fromNode.x,
@@ -1116,12 +1165,14 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             currentAccel: 0,
                             motionPhase: "STOPPED",
                             status: "WAITING AT NODE (EDGE OCCUPIED)",
-                            turnStatus: `Holding at Node - Edge Occupied by ${currentEdgeBlocker}`
+                            turnStatus: `Holding at Node - Edge Occupied by ${currentEdgeBlocker}`,
+                            currentSegmentIndex: k,
+                            segmentProgress: 0
                         };
                     }
 
                     // =========================================================
-                    // 3. CHECK IF DESTINATION NODE / CONNECTING EDGE IS OCCUPIED (3/4TH STANDOFF TRIGGER)
+                    // 3. CHECK IF DESTINATION NODE / INTERSECTION IS OCCUPIED (3/4TH STANDOFF TRIGGER)
                     // =========================================================
                     let isToNodeOccupiedAhead = false;
                     let toNodeOccupiedInfo = "";
@@ -1129,33 +1180,61 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     for (let j = 0; j < prevVehicles.length; j++) {
                         if (j === i) continue;
                         const other = prevVehicles[j];
-                        if (other.status === "DESTINATION REACHED") continue;
+                        const otherSafety = other.safetyDistanceCm !== undefined ? Number(other.safetyDistanceCm) : 50.0;
+                        const reqBuffer = Math.max(vehSafetyDist, otherSafety);
 
-                        // Check if other is occupying an edge connected to toNode
-                        const connectsToNode = (other.fromNodeId === toNodeId || other.toNodeId === toNodeId);
-                        if (connectsToNode) {
-                            const otherIsTraversing = other.motionPhase !== "STOPPED" || 
-                                                      other.status?.includes("STANDOFF") || 
-                                                      other.status?.includes("MOVING") || 
-                                                      other.status?.includes("TURNING") || 
-                                                      other.status?.includes("APPROACH");
-                            
-                            const distOtherToNode = Math.hypot(other.x - toNode.x, other.y - toNode.y) * scaleCmPerPx;
-                            const otherSafety = other.safetyDistanceCm || 50.0;
-
-                            if (otherIsTraversing || distOtherToNode <= otherSafety + 25.0) {
+                        if (other.status === "DESTINATION REACHED") {
+                            if (other.scheduleNodes && other.scheduleNodes[other.scheduleNodes.length - 1] === toNodeId) {
                                 isToNodeOccupiedAhead = true;
-                                toNodeOccupiedInfo = `Robot R${other.robotId + 1}`;
+                                toNodeOccupiedInfo = `Parked Robot R${other.robotId + 1}`;
                                 break;
+                            }
+                            continue;
+                        }
+
+                        const distOtherToNode = Math.hypot(other.x - toNode.x, other.y - toNode.y) * scaleCmPerPx;
+
+                        // 1. If other vehicle is physically at or inside toNode (turning, waiting, or traversing the intersection):
+                        // A vehicle holding at 3/4 standoff is ON ITS EDGE, NOT occupying the vertex!
+                        const isOtherHoldingStandoff = other.status?.includes("STANDOFF") || 
+                            (other.segmentProgress !== undefined && Math.abs(other.segmentProgress - 0.75) < 0.05);
+
+                        const isOtherPhysicallyAtToNode = !isOtherHoldingStandoff && (
+                            distOtherToNode <= 15.0 ||
+                            (other.fromNodeId === toNodeId && (other.segmentProgress || 0) < 0.08) ||
+                            (other.toNodeId === toNodeId && (other.segmentProgress || 0) >= 0.95)
+                        );
+
+                        if (isOtherPhysicallyAtToNode) {
+                            isToNodeOccupiedAhead = true;
+                            toNodeOccupiedInfo = `Robot R${other.robotId + 1}`;
+                            break;
+                        }
+
+                        // 2. If other vehicle is converging to the exact same toNode with priority (scheduled earlier or tie-break by ID):
+                        if (other.toNodeId === toNodeId) {
+                            const otherArrTo = (other.scheduleTimes && other.scheduleNodes) 
+                                ? (other.scheduleTimes[(other.currentSegmentIndex || 0) + 1] ?? 999999)
+                                : 999999;
+                            const isOtherPriority = (otherArrTo < tArrivalTo - 0.2) || 
+                                (Math.abs(otherArrTo - tArrivalTo) <= 0.2 && other.robotId < veh.robotId);
+
+                            if (isOtherPriority) {
+                                const distVehToNode = Math.hypot(veh.x - toNode.x, veh.y - toNode.y) * scaleCmPerPx;
+                                if (distOtherToNode <= distVehToNode + 25.0) {
+                                    isToNodeOccupiedAhead = true;
+                                    toNodeOccupiedInfo = `Priority Robot R${other.robotId + 1}`;
+                                    break;
+                                }
                             }
                         }
                     }
 
-                    const hasScheduledHold = (tArrivalTo - tArrivalFrom) >= (minStepTime + 0.1) && tFinalDepart >= tStandoffArrival;
+                    const hasScheduledHold = (tArrivalTo - tArrivalFrom) >= (minStepTime + 0.1);
                     const shouldAdvance34 = (hasScheduledHold || isToNodeOccupiedAhead) && !isCurrentEdgeOccupied;
 
                     // =========================================================
-                    // 4. MOTION EXECUTION: 3/4TH STANDOFF ADVANCE VS STANDARD
+                    // 4. MOTION EXECUTION: 3/4TH STANDOFF ADVANCE VS STANDARD CONTINUOUS
                     // =========================================================
                     let heading = segHeading;
                     let turningAngle = 0;
@@ -1166,6 +1245,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     let motionPhase = "STOPPED";
                     let status = "MOVING";
                     let turnStatus = "Straight (0°)";
+                    let progress = veh.segmentProgress || 0;
 
                     if (shouldAdvance34) {
                         // 3/4th Advance Standoff Sequence
@@ -1173,7 +1253,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         if (hasTurn && t < tTurnEnd) {
                             x = fromNode.x;
                             y = fromNode.y;
-                            const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, fixedTurnDuration)));
+                            const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, turnDuration)));
                             const turnEase = 0.5 - 0.5 * Math.cos(turnProgress * Math.PI);
                             heading = Math.round((prevHeading + angleDiff * turnEase + 360) % 360);
                             turningAngle = Math.abs(Math.round(angleDiff * (1 - turnProgress)));
@@ -1182,13 +1262,14 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             currentSpeed = 0;
                             currentAccel = 0;
                             motionPhase = "TURNING";
+                            progress = 0;
                         }
                         // Phase 2: Actively moving 3/4th (75%) distance towards toNode
                         else if (t < tStandoffArrival) {
                             const advanceElapsed = Math.max(0, t - tTurnEnd);
                             const kin34 = calculateKinematics(0.75 * distance, speedCmPerSec, accelTimeSec, decelTimeSec, advanceElapsed);
                             const advanceProgress = Math.min(1, Math.max(0, kin34.progress));
-                            const progress = 0.75 * advanceProgress;
+                            progress = 0.75 * advanceProgress;
 
                             const candidateX = fromNode.x + (toNode.x - fromNode.x) * progress;
                             const candidateY = fromNode.y + (toNode.y - fromNode.y) * progress;
@@ -1207,6 +1288,10 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 if (cdist <= reqBuf) {
                                     const fwdDist = (cdx * fwdX + cdy * fwdY) * scaleCmPerPx;
                                     if (fwdDist < -2.0) continue;
+                                    const otherHoldingStandoffOnOtherEdge = 
+                                        (other.status?.includes("STANDOFF") || (other.segmentProgress !== undefined && Math.abs(other.segmentProgress - 0.75) < 0.05)) &&
+                                        (other.fromNodeId !== fromNodeId || other.toNodeId !== toNodeId);
+                                    if (otherHoldingStandoffOnOtherEdge) continue;
                                     if (other.status === "DESTINATION REACHED" && fwdDist > 0) {
                                         candidateBlocked = true;
                                         candidateInfo = { id: other.robotId, distCm: cdist, reqBuf, label: `Parked Robot R${other.robotId + 1}` };
@@ -1230,7 +1315,9 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                     currentAccel: 0,
                                     motionPhase: "STOPPED",
                                     status: `STOPPED (${Math.round(candidateInfo.reqBuf)}CM SAFETY DISTANCE)`,
-                                    turnStatus: `Yielding to ${candidateInfo.label} (${candidateInfo.distCm.toFixed(1)}cm) - Keeping ${Math.round(candidateInfo.reqBuf)}cm buffer`
+                                    turnStatus: `Yielding to ${candidateInfo.label} (${candidateInfo.distCm.toFixed(1)}cm) - Keeping ${Math.round(candidateInfo.reqBuf)}cm buffer`,
+                                    currentSegmentIndex: k,
+                                    segmentProgress: veh.segmentProgress || progress
                                 };
                             }
 
@@ -1244,7 +1331,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             status = "MOVING (3/4 ADVANCE)";
                             turnStatus = `Advancing 75% Distance (${(advanceProgress * 75).toFixed(0)}%) to Standoff`;
                         }
-                        // Phase 3: Holding at 75% standoff point until edge ahead clears AND scheduled release
+                        // Phase 3: Holding at 75% standoff point until edge/node ahead clears AND scheduled release
                         else if (t < tFinalDepart || isToNodeOccupiedAhead) {
                             x = fromNode.x + (toNode.x - fromNode.x) * 0.75;
                             y = fromNode.y + (toNode.y - fromNode.y) * 0.75;
@@ -1257,6 +1344,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             turnStatus = isToNodeOccupiedAhead
                                 ? `Holding 75% Standoff Buffer (${toNodeOccupiedInfo} Occupying ${toNode.label || toNodeId})`
                                 : "Holding 75% Standoff Buffer... Edge Ahead Occupied";
+                            progress = 0.75;
 
                             if (t >= tFinalDepart && isToNodeOccupiedAhead) {
                                 return {
@@ -1275,7 +1363,9 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                     toNodeId,
                                     fromNodeLabel: fromNode.label || fromNode.id,
                                     toNodeLabel: toNode.label || toNode.id,
-                                    segmentDistance: distance
+                                    segmentDistance: distance,
+                                    currentSegmentIndex: k,
+                                    segmentProgress: 0.75
                                 };
                             }
                         }
@@ -1284,7 +1374,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             const finalElapsed = Math.max(0, t - tFinalDepart);
                             const kin25 = calculateKinematics(0.25 * distance, speedCmPerSec, accelTimeSec, decelTimeSec, finalElapsed);
                             const finalProgress = Math.min(1, Math.max(0, kin25.progress));
-                            const progress = 0.75 + 0.25 * finalProgress;
+                            progress = 0.75 + 0.25 * finalProgress;
 
                             const candidateX = fromNode.x + (toNode.x - fromNode.x) * progress;
                             const candidateY = fromNode.y + (toNode.y - fromNode.y) * progress;
@@ -1303,6 +1393,10 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 if (cdist <= reqBuf) {
                                     const fwdDist = (cdx * fwdX + cdy * fwdY) * scaleCmPerPx;
                                     if (fwdDist < -2.0) continue;
+                                    const otherHoldingStandoffOnOtherEdge = 
+                                        (other.status?.includes("STANDOFF") || (other.segmentProgress !== undefined && Math.abs(other.segmentProgress - 0.75) < 0.05)) &&
+                                        (other.fromNodeId !== fromNodeId || other.toNodeId !== toNodeId);
+                                    if (otherHoldingStandoffOnOtherEdge) continue;
                                     if (other.status === "DESTINATION REACHED" && fwdDist > 0) {
                                         candidateBlocked = true;
                                         candidateInfo = { id: other.robotId, distCm: cdist, reqBuf, label: `Parked Robot R${other.robotId + 1}` };
@@ -1326,7 +1420,9 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                     currentAccel: 0,
                                     motionPhase: "STOPPED",
                                     status: `STOPPED (${Math.round(candidateInfo.reqBuf)}CM SAFETY DISTANCE)`,
-                                    turnStatus: `Yielding to ${candidateInfo.label} (${candidateInfo.distCm.toFixed(1)}cm) - Keeping ${Math.round(candidateInfo.reqBuf)}cm buffer`
+                                    turnStatus: `Yielding to ${candidateInfo.label} (${candidateInfo.distCm.toFixed(1)}cm) - Keeping ${Math.round(candidateInfo.reqBuf)}cm buffer`,
+                                    currentSegmentIndex: k,
+                                    segmentProgress: veh.segmentProgress || progress
                                 };
                             }
 
@@ -1367,7 +1463,9 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 toNodeId,
                                 fromNodeLabel: fromNode.label || fromNode.id,
                                 toNodeLabel: toNode.label || toNode.id,
-                                segmentDistance: distance
+                                segmentDistance: distance,
+                                currentSegmentIndex: k,
+                                segmentProgress: 0
                             };
                         }
 
@@ -1383,12 +1481,14 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             currentSpeed = 0;
                             currentAccel = 0;
                             motionPhase = "TURNING";
+                            progress = 0;
                         } else {
-                            const moveDuration = Math.max(0.001, tArrivalTo - tDepart);
-                            const moveElapsed = Math.max(0, t - tDepart);
+                            const moveStartTime = Math.max(tDepart, tTurnEnd);
+                            const moveDuration = Math.max(0.001, tArrivalTo - moveStartTime);
+                            const moveElapsed = Math.max(0, t - moveStartTime);
                             const effectiveElapsed = Math.min(kinSeg.totalTime, moveElapsed * (kinSeg.totalTime / moveDuration));
                             const kin = calculateKinematics(distance, speedCmPerSec, accelTimeSec, decelTimeSec, effectiveElapsed);
-                            const progress = Math.min(1, Math.max(0, kin.progress));
+                            progress = Math.min(1, Math.max(0, kin.progress));
 
                             const candidateX = fromNode.x + (toNode.x - fromNode.x) * progress;
                             const candidateY = fromNode.y + (toNode.y - fromNode.y) * progress;
@@ -1407,6 +1507,10 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 if (cdist <= reqBuf) {
                                     const fwdDist = (cdx * fwdX + cdy * fwdY) * scaleCmPerPx;
                                     if (fwdDist < -2.0) continue;
+                                    const otherHoldingStandoffOnOtherEdge = 
+                                        (other.status?.includes("STANDOFF") || (other.segmentProgress !== undefined && Math.abs(other.segmentProgress - 0.75) < 0.05)) &&
+                                        (other.fromNodeId !== fromNodeId || other.toNodeId !== toNodeId);
+                                    if (otherHoldingStandoffOnOtherEdge) continue;
                                     if (other.status === "DESTINATION REACHED" && fwdDist > 0) {
                                         candidateBlocked = true;
                                         candidateInfo = { id: other.robotId, distCm: cdist, reqBuf, label: `Parked Robot R${other.robotId + 1}` };
@@ -1431,7 +1535,9 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                     currentAccel: 0,
                                     motionPhase: "STOPPED",
                                     status: `STOPPED (${Math.round(candidateInfo.reqBuf)}CM SAFETY DISTANCE)`,
-                                    turnStatus: `Yielding to ${candidateInfo.label} (${candidateInfo.distCm.toFixed(1)}cm) - Keeping ${Math.round(candidateInfo.reqBuf)}cm buffer`
+                                    turnStatus: `Yielding to ${candidateInfo.label} (${candidateInfo.distCm.toFixed(1)}cm) - Keeping ${Math.round(candidateInfo.reqBuf)}cm buffer`,
+                                    currentSegmentIndex: k,
+                                    segmentProgress: veh.segmentProgress || progress
                                 };
                             }
 
@@ -1451,6 +1557,48 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         }
                     }
 
+                    // Smooth segment completion & transition
+                    let nextSegmentIndex = k;
+                    let nextSegmentProgress = progress;
+                    let nextDelayAccumSec = delay;
+
+                    if (progress >= 0.999) {
+                        x = toNode.x;
+                        y = toNode.y;
+                        nextSegmentProgress = 1.0;
+
+                        if (k >= scheduleNodes.length - 2) {
+                            return {
+                                ...veh,
+                                x: toNode.x,
+                                y: toNode.y,
+                                heading,
+                                turningAngle: 0,
+                                turnStatus: "Parked at Destination",
+                                status: "DESTINATION REACHED",
+                                currentSpeed: 0,
+                                currentAccel: 0,
+                                motionPhase: "STOPPED",
+                                currentSegmentIndex: k + 1,
+                                segmentProgress: 1.0,
+                                fromNodeId: toNodeId,
+                                toNodeId: toNodeId,
+                                fromNodeLabel: toNode.label || toNode.id,
+                                toNodeLabel: toNode.label || toNode.id,
+                                segmentDistance: 0
+                            };
+                        } else {
+                            nextSegmentIndex = k + 1;
+                            nextSegmentProgress = 0.0;
+                        }
+                    } else {
+                        // En-route: if time has passed tArrivalTo but progress has not reached 100%,
+                        // accumulate delay so t does not outrun physical progress
+                        if (t >= tArrivalTo - 0.001) {
+                            nextDelayAccumSec = delay + dt;
+                        }
+                    }
+
                     return {
                         ...veh,
                         x,
@@ -1466,7 +1614,10 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         toNodeId,
                         fromNodeLabel: fromNode.label || fromNode.id,
                         toNodeLabel: toNode.label || toNode.id,
-                        segmentDistance: distance
+                        segmentDistance: distance,
+                        currentSegmentIndex: nextSegmentIndex,
+                        segmentProgress: nextSegmentProgress,
+                        delayAccumSec: nextDelayAccumSec
                     };
                 });
             });

@@ -33,6 +33,8 @@ public class RobotPathPlannerService {
         public double speedCmPerSec;
         public double accelerationCmPerSec2;
         public double decelerationCmPerSec2;
+        public Double accelTimeSec;
+        public Double decelTimeSec;
 
         public Double safetyDistanceCm;
     }
@@ -143,8 +145,18 @@ public class RobotPathPlannerService {
                 throw new IllegalArgumentException("Robot start or end node not found in graph.");
             }
 
-            Robot r = new Robot(req.id, src, dst, req.speedCmPerSec, req.accelerationCmPerSec2,
-                    req.decelerationCmPerSec2, req.safetyDistanceCm);
+            double accel = req.accelerationCmPerSec2;
+            if (accel <= 0.0 && req.accelTimeSec != null && req.accelTimeSec > 0.0 && req.speedCmPerSec > 0.0) {
+                accel = req.speedCmPerSec / req.accelTimeSec;
+            }
+
+            double decel = req.decelerationCmPerSec2;
+            if (decel <= 0.0 && req.decelTimeSec != null && req.decelTimeSec > 0.0 && req.speedCmPerSec > 0.0) {
+                decel = req.speedCmPerSec / req.decelTimeSec;
+            }
+
+            Robot r = new Robot(req.id, src, dst, req.speedCmPerSec, accel,
+                    decel, req.safetyDistanceCm);
             r.path = shortestPath(r.src, r.dst, connections, weights);
             r.freeRunDistance = pathDistance(r.path, weights);
             r.freeRunTime = 0.0;
@@ -376,8 +388,10 @@ public class RobotPathPlannerService {
                     }
 
                     // 3/4th Distance Advance Algorithm:
-                    // If the approaching robot's edge (pos -> next) is NOT occupied by another vehicle,
-                    // all other robots approaching the occupied edge/node advance 3/4th of the edge distance
+                    // If the approaching robot's edge (pos -> next) is NOT occupied by another
+                    // vehicle,
+                    // all other robots approaching the occupied edge/node advance 3/4th of the edge
+                    // distance
                     // and wait at the 3/4th standoff point until the edge/node clears!
                     double t34TravelTime = computeTravelTime(0.75 * edgeDist, r.speedCmPerSec, r.accelerationCmPerSec2,
                             r.decelerationCmPerSec2);
