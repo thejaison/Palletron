@@ -27,24 +27,32 @@ public class RobotController {
     public Object status(@PathVariable("id") String id) { return ws.status(id); }
 
     @PostMapping("/{id}/config")
-    public ResponseEntity<?> config(@PathVariable("id") String id, @RequestBody ConfigReq r) throws IOException {
-        return dispatch(id, Map.of("type", "config", "speed", r.speed(),
-                "acceleration", r.acceleration(), "deceleration", r.deceleration()));
+    public ResponseEntity<?> config(@PathVariable("id") String id, @RequestBody Map<String, Object> body) throws IOException {
+        double speed = body.containsKey("speed") ? ((Number) body.get("speed")).doubleValue() : 25.0;
+        double accel = body.containsKey("acceleration") ? ((Number) body.get("acceleration")).doubleValue() : 25.0;
+        double decel = body.containsKey("deceleration") ? ((Number) body.get("deceleration")).doubleValue() : 25.0;
+        return dispatch(id, Map.of("type", "config", "speed", speed, "acceleration", accel, "deceleration", decel));
     }
 
     @PostMapping("/{id}/forward")
-    public ResponseEntity<?> forward(@PathVariable("id") String id, @RequestBody DistanceReq r) throws IOException {
-        return dispatch(id, Map.of("type", "move", "action", "forward", "value", r.distance()));
+    public ResponseEntity<?> forward(@PathVariable("id") String id, @RequestBody Map<String, Object> body) throws IOException {
+        double dist = body.containsKey("distance") ? ((Number) body.get("distance")).doubleValue()
+                    : body.containsKey("value") ? ((Number) body.get("value")).doubleValue() : 0.0;
+        return dispatch(id, Map.of("type", "move", "action", "forward", "value", dist));
     }
 
     @PostMapping("/{id}/left")
-    public ResponseEntity<?> left(@PathVariable("id") String id, @RequestBody AngleReq r) throws IOException {
-        return dispatch(id, Map.of("type", "move", "action", "left", "value", r.angle()));
+    public ResponseEntity<?> left(@PathVariable("id") String id, @RequestBody Map<String, Object> body) throws IOException {
+        double angle = body.containsKey("angle") ? ((Number) body.get("angle")).doubleValue()
+                     : body.containsKey("value") ? ((Number) body.get("value")).doubleValue() : 90.0;
+        return dispatch(id, Map.of("type", "move", "action", "left", "value", angle));
     }
 
     @PostMapping("/{id}/right")
-    public ResponseEntity<?> right(@PathVariable("id") String id, @RequestBody AngleReq r) throws IOException {
-        return dispatch(id, Map.of("type", "move", "action", "right", "value", r.angle()));
+    public ResponseEntity<?> right(@PathVariable("id") String id, @RequestBody Map<String, Object> body) throws IOException {
+        double angle = body.containsKey("angle") ? ((Number) body.get("angle")).doubleValue()
+                     : body.containsKey("value") ? ((Number) body.get("value")).doubleValue() : 90.0;
+        return dispatch(id, Map.of("type", "move", "action", "right", "value", angle));
     }
 
     @PostMapping("/{id}/stop")

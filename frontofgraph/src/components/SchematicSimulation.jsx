@@ -13,7 +13,8 @@ import {
     Move,
     X,
     RotateCcw,
-    Gauge
+    Gauge,
+    Zap
 } from "lucide-react";
 
 export default function SchematicSimulation({
@@ -31,7 +32,10 @@ export default function SchematicSimulation({
     activeLogs = [],
     setActiveLogs,
     onSwitchTab,
-    saveRobotRoutesToDb
+    saveRobotRoutesToDb,
+    syncHardware = true,
+    setSyncHardware,
+    connectedRobots = []
 }) {
     const svgRef = useRef(null);
 
@@ -538,6 +542,41 @@ export default function SchematicSimulation({
                         {isSimulating ? <Square size={13} fill="#DC2626" /> : <Play size={13} fill="#059669" />}
                         {isSimulating ? "Stop Simulation" : "Start Simulation"}
                     </button>
+
+                    {/* Hardware Sync Toggle */}
+                    {setSyncHardware && (
+                        <button
+                            onClick={() => setSyncHardware(!syncHardware)}
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "6px",
+                                padding: "6px 12px",
+                                borderRadius: "7px",
+                                fontWeight: 600,
+                                fontSize: "12px",
+                                cursor: "pointer",
+                                transition: "all 0.15s ease",
+                                border: syncHardware ? "1px solid #10B981" : "1px solid #D1D5DB",
+                                background: syncHardware ? "#ECFDF5" : "#F9FAFB",
+                                color: syncHardware ? "#059669" : "#6B7280"
+                            }}
+                            title="Synchronize physical ESP32 robots with simulation"
+                        >
+                            <Zap size={13} fill={syncHardware ? "#059669" : "none"} />
+                            <span>Hardware Sync: {syncHardware ? "ON" : "OFF"}</span>
+                            <span style={{
+                                fontSize: "10px",
+                                padding: "1px 6px",
+                                borderRadius: "10px",
+                                background: connectedRobots.length > 0 ? "#D1FAE5" : "#FEE2E2",
+                                color: connectedRobots.length > 0 ? "#059669" : "#DC2626",
+                                fontWeight: 700
+                            }}>
+                                {connectedRobots.length > 0 ? connectedRobots.join(", ") : "Offline"}
+                            </span>
+                        </button>
+                    )}
 
                     <button
                         onClick={deCongestLayout}

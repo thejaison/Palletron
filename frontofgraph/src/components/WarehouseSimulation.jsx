@@ -549,6 +549,57 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
     const maxSimTimeRef = useRef(0);
     const lastFrameTimeRef = useRef(null);
 
+    // Physical Hardware Synchronization States
+    const [syncHardware, setSyncHardware] = useState(true);
+    const [connectedRobots, setConnectedRobots] = useState([]);
+    const hardwareDispatchRef = useRef({});
+
+    // Poll connected physical robots from Spring Boot backend
+    useEffect(() => {
+        let isMounted = true;
+        const fetchConnected = async () => {
+            try {
+                const res = await fetch("http://localhost:8080/api/robots");
+                if (res.ok) {
+                    const list = await res.json();
+                    if (isMounted && Array.isArray(list)) {
+                        setConnectedRobots(list);
+                    }
+                }
+            } catch (err) {
+                // Ignore if backend offline
+            }
+        };
+        fetchConnected();
+        const pollTimer = setInterval(fetchConnected, 3000);
+        return () => {
+            isMounted = false;
+            clearInterval(pollTimer);
+        };
+    }, []);
+
+    // Dispatch REST commands to physical ESP32 robots
+    const dispatchHardwareCommand = async (robotId, action, payload = {}) => {
+        if (!syncHardware) return;
+        const robotCode = `R${robotId + 1}`;
+        try {
+            await fetch(`http://localhost:8080/api/robots/${robotCode}/${action}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+        } catch (err) {
+            console.warn(`[Hardware Sync] Failed ${action} to ${robotCode}:`, err);
+        }
+    };
+
+    const dispatchHardwarePhase = (robotId, phaseKey, action, payload = {}) => {
+        if (!syncHardware) return;
+        if (hardwareDispatchRef.current[robotId] === phaseKey) return;
+        hardwareDispatchRef.current[robotId] = phaseKey;
+        dispatchHardwareCommand(robotId, action, payload);
+    };
+
     // Compute currently occupied edges and their connecting terminal nodes
     const { occupiedNodesMap, occupiedEdgeSet } = useMemo(() => {
         const nodeMap = new Map();
@@ -716,10 +767,22 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
             setActiveSimMode(null);
             setVehicles([]);
             setActiveLogs(terminalLogsRef.current.filter(log => log.time < 0));
+            if (syncHardware) {
+                for (let i = 0; i < vehicleCount; i++) {
+                    dispatchHardwareCommand(i, "stop");
+                }
+                hardwareDispatchRef.current = {};
+            }
         } else {
             // Stop any running simulation on the other canvas first
             setActiveSimMode(null);
             setVehicles([]);
+            if (syncHardware) {
+                for (let i = 0; i < vehicleCount; i++) {
+                    dispatchHardwareCommand(i, "stop");
+                }
+                hardwareDispatchRef.current = {};
+            }
             const loadingNodes = nodes.filter(n => n.type === "loading");
             const unloadingNodes = nodes.filter(n => n.type === "unloading");
 
@@ -837,6 +900,18 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                 terminalLogsRef.current = generated;
                 setActiveLogs(generated.filter(log => log.time < 0));
 
+                // Reset hardware command tracking and configure physical robots
+                if (syncHardware) {
+                    hardwareDispatchRef.current = {};
+                    robotRequests.forEach(req => {
+                        dispatchHardwareCommand(req.id, "config", {
+                            speed: req.speedCmPerSec,
+                            acceleration: req.accelerationCmPerSec2,
+                            deceleration: req.decelerationCmPerSec2
+                        });
+                    });
+                }
+
                 setVehicles(newVehicles);
                 setActiveSimMode(targetMode);
             } catch (err) {
@@ -885,11 +960,18 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                 if (allFinished) {
                     setActiveSimMode(null);
                     setActiveLogs(terminalLogsRef.current);
+                    if (syncHardware) {
+                        for (let r = 0; r < vehicleCount; r++) {
+                            dispatchHardwareCommand(r, "stop");
+                        }
+                        hardwareDispatchRef.current = {};
+                    }
                     return prevVehicles;
                 }
 
                 return prevVehicles.map((veh, i) => {
                     if (veh.status === "DESTINATION REACHED") {
+                        dispatchHardwarePhase(veh.robotId, "dest_reached", "stop");
                         return {
                             ...veh,
                             currentSpeed: 0,
@@ -909,6 +991,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     // Physical segment index tracking
                     const k = veh.currentSegmentIndex !== undefined ? veh.currentSegmentIndex : 0;
                     if (k >= scheduleNodes.length - 1) {
+                        dispatchHardwarePhase(veh.robotId, "dest_reached", "stop");
                         const endNode = nodes.find(n => n.id === scheduleNodes[scheduleNodes.length - 1]);
                         return {
                             ...veh,
@@ -944,6 +1027,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         }
 
                         if (blockedAtStart) {
+                            dispatchHardwarePhase(veh.robotId, `start_blocked_${k}`, "stop");
                             return {
                                 ...veh,
                                 x: startNode ? startNode.x : veh.x,
@@ -959,6 +1043,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             };
                         }
 
+                        dispatchHardwarePhase(veh.robotId, `start_stage_${k}`, "stop");
                         return {
                             ...veh,
                             x: startNode ? startNode.x : veh.x,
@@ -1101,6 +1186,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     }
 
                     if (isBlockedSafetyDist) {
+                        dispatchHardwarePhase(veh.robotId, `safety_stop_${k}`, "stop");
                         return {
                             ...veh,
                             x: veh.x,
@@ -1156,6 +1242,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     }
 
                     if (isCurrentEdgeOccupied && isPhysicallyAtOrigin && t < tDepart) {
+                        dispatchHardwarePhase(veh.robotId, `edge_blocked_${k}`, "stop");
                         return {
                             ...veh,
                             x: fromNode.x,
@@ -1251,6 +1338,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         // 3/4th Advance Standoff Sequence
                         // Phase 1: Turn at fromNode before advance
                         if (hasTurn && t < tTurnEnd) {
+                            const turnAction = angleDiff > 0 ? "left" : "right";
+                            dispatchHardwarePhase(veh.robotId, `turn_adv_${k}`, turnAction, { angle: Math.abs(Math.round(angleDiff)) });
                             x = fromNode.x;
                             y = fromNode.y;
                             const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, turnDuration)));
@@ -1306,6 +1395,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             }
 
                             if (candidateBlocked) {
+                                dispatchHardwarePhase(veh.robotId, `adv34_blocked_${k}`, "stop");
                                 return {
                                     ...veh,
                                     x: veh.x,
@@ -1321,6 +1411,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 };
                             }
 
+                            dispatchHardwarePhase(veh.robotId, `adv34_fwd_${k}`, "forward", { distance: 0.75 * distance });
                             x = candidateX;
                             y = candidateY;
                             heading = segHeading;
@@ -1333,6 +1424,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         }
                         // Phase 3: Holding at 75% standoff point until edge/node ahead clears AND scheduled release
                         else if (t < tFinalDepart || isToNodeOccupiedAhead) {
+                            dispatchHardwarePhase(veh.robotId, `hold34_${k}`, "stop");
                             x = fromNode.x + (toNode.x - fromNode.x) * 0.75;
                             y = fromNode.y + (toNode.y - fromNode.y) * 0.75;
                             heading = segHeading;
@@ -1411,6 +1503,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             }
 
                             if (candidateBlocked) {
+                                dispatchHardwarePhase(veh.robotId, `final25_blocked_${k}`, "stop");
                                 return {
                                     ...veh,
                                     x: veh.x,
@@ -1426,6 +1519,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 };
                             }
 
+                            dispatchHardwarePhase(veh.robotId, `final25_fwd_${k}`, "forward", { distance: 0.25 * distance });
                             x = candidateX;
                             y = candidateY;
                             heading = segHeading;
@@ -1439,6 +1533,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                     } else {
                         // Standard Continuous Motion:
                         if (t < tDepart) {
+                            dispatchHardwarePhase(veh.robotId, `wait_node_${k}`, "stop");
                             let h = segHeading;
                             let tAngle = 0;
                             if (hasTurn) {
@@ -1470,6 +1565,8 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         }
 
                         if (hasTurn && t < tTurnEnd) {
+                            const turnAction = angleDiff > 0 ? "left" : "right";
+                            dispatchHardwarePhase(veh.robotId, `turn_std_${k}`, turnAction, { angle: Math.abs(Math.round(angleDiff)) });
                             x = fromNode.x;
                             y = fromNode.y;
                             const turnProgress = Math.min(1, Math.max(0, (t - tArrivalFrom) / Math.max(0.001, turnDuration)));
@@ -1526,6 +1623,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                             }
 
                             if (candidateBlocked) {
+                                dispatchHardwarePhase(veh.robotId, `std_fwd_blocked_${k}`, "stop");
                                 return {
                                     ...veh,
                                     x: veh.x,
@@ -1541,6 +1639,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                                 };
                             }
 
+                            dispatchHardwarePhase(veh.robotId, `std_fwd_${k}`, "forward", { distance: distance });
                             x = candidateX;
                             y = candidateY;
                             heading = segHeading;
@@ -1568,6 +1667,7 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         nextSegmentProgress = 1.0;
 
                         if (k >= scheduleNodes.length - 2) {
+                            dispatchHardwarePhase(veh.robotId, "dest_reached", "stop");
                             return {
                                 ...veh,
                                 x: toNode.x,
@@ -1629,6 +1729,12 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
 
         return () => {
             if (animationFrame) cancelAnimationFrame(animationFrame);
+            if (syncHardware) {
+                for (let r = 0; r < vehicleCount; r++) {
+                    dispatchHardwareCommand(r, "stop");
+                }
+                hardwareDispatchRef.current = {};
+            }
         };
     }, [activeSimMode, nodes, edges]);
 
@@ -2106,6 +2212,9 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         setActiveLogs={setActiveLogs}
                         onSwitchTab={handleSwitchTab}
                         saveRobotRoutesToDb={saveRobotRoutesToDb}
+                        syncHardware={syncHardware}
+                        setSyncHardware={setSyncHardware}
+                        connectedRobots={connectedRobots}
                     />
                 </div>
             ) : (
@@ -2206,6 +2315,33 @@ export default function WarehouseSimulation({ defaultTab = "schematic" }) {
                         >
                             {isSimulatingDark ? <Square size={14} fill="#EF4444" /> : <Play size={14} fill="#10B981" />}
                             {isSimulatingDark ? "Stop Simulation" : "Start Simulation"}
+                        </button>
+
+                        <button
+                            onClick={() => setSyncHardware(!syncHardware)}
+                            style={{
+                                ...styles.toolButton,
+                                background: syncHardware ? "rgba(16, 185, 129, 0.15)" : "rgba(255, 255, 255, 0.04)",
+                                border: syncHardware ? "1px solid rgba(16, 185, 129, 0.4)" : "1px solid rgba(255, 255, 255, 0.1)",
+                                color: syncHardware ? "#10B981" : "#9CA3AF",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "6px"
+                            }}
+                            title="Synchronize physical ESP32 robots with simulation"
+                        >
+                            <Zap size={14} fill={syncHardware ? "#10B981" : "none"} />
+                            <span>Hardware Sync: {syncHardware ? "ON" : "OFF"}</span>
+                            <span style={{
+                                fontSize: "10px",
+                                padding: "2px 6px",
+                                borderRadius: "10px",
+                                background: connectedRobots.length > 0 ? "rgba(16, 185, 129, 0.2)" : "rgba(239, 68, 68, 0.2)",
+                                color: connectedRobots.length > 0 ? "#34D399" : "#F87171",
+                                fontWeight: 600
+                            }}>
+                                {connectedRobots.length > 0 ? connectedRobots.join(", ") : "Offline"}
+                            </span>
                         </button>
 
                         <div style={styles.toolDivider} />
